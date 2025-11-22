@@ -1,33 +1,51 @@
-```markdown
-# GH Pages Roguelite AI Demo (static-only)
+# Top-Down Roguelite: You Spawn Enemies, AI Controls the Player
 
-This example runs entirely on GitHub Pages (static hosting). There is no server, no API keys, and no external LLM calls.
+A small prototype/top-down roguelite where:
+- You (the user) spawn enemies of different types and try to defeat an AI-controlled player.
+- The AI is a simple neural network that "learns" between runs using an online evolutionary (hill-climb) strategy — the best weights are saved to disk and loaded on the next run.
+- The AI collects currency by killing enemies and can buy upgrades in a shop that appears periodically.
+- Two modes:
+  - Play mode (default): Interactive. You spawn enemies with keys and watch the AI play using the saved best network.
+  - Train mode (`--train`): Autonomous training where random enemies are spawned; the AI evolves weights based on episode fitness and saves improvements.
 
-What it includes:
-- index.html: canvas game UI and bootstrap
-- game.js: small top-down game (player, enemies, resources)
-- ai.js: client-side instruction interpreter and agent/fallback FSM
-- instructions.json: text instructions you can edit via GitHub
+This is a prototype — intended as a starting point to extend with more sophisticated learning (NEAT / PPO / Q-learning) or richer game mechanics.
 
-How to host on GitHub Pages:
-1. Create a new repository (or use an existing one).
-2. Add the above files to the repository root or to the `docs/` folder.
-3. In repository Settings -> Pages, choose the branch (main) and folder (`/ (root)` or `/docs`) and save.
-4. Visit the GitHub Pages URL shown in the settings; the game should load.
+Controls (in Play mode)
+- 1: spawn a Melee enemy at mouse position
+- 2: spawn a Ranged enemy at mouse position
+- 3: spawn a Fast enemy at mouse position
+- T: toggle autonomous training on/off (in play mode it will run episodes in the background)
+- S: save current AI weights and upgrade state
+- L: load saved AI weights (if present)
+- ESC / Close window: quit
 
-How to change instructions:
-- Edit `instructions.json` in the repository and push changes.
-- The game fetches the file every ~3 seconds and updates the agent's behavior.
+Requirements
+- Python 3.8+
+- pygame
+- numpy
 
-Limitations and next steps:
-- This demo does not use an LLM. GitHub Pages is static and cannot hold private API keys or run server code.
-- Options to use an LLM while still hosting static files:
-  - Use a serverless function (Cloudflare Workers, Netlify Functions, Vercel Serverless) to act as a secure proxy for the LLM API; keep the key there. The GitHub Pages site would call that function.
-  - Run a WebAssembly / in-browser model like llama.cpp via wasm (heavy; model files are large).
-  - Use GitHub Actions to regenerate a parsed instructions.json periodically (Actions can call an LLM) — this is not real-time but can be used for semi-static instruction generation.
-- If you want, I can help:
-  - Add Cloudflare Worker example to proxy to OpenAI without exposing keys.
-  - Show how to integrate a small on-device model (llama.js) and host model files on a separate CDN.
+Install dependencies:
+pip install -r requirements.txt
 
-Enjoy! Open the repo's GitHub Pages URL to try it.
-```
+Run
+- Play (interactive): python main.py
+- Train headless (autonomous): python main.py --train
+
+Files
+- main.py: game loop, input handling, play & train modes
+- ai/agent.py: neural network agent, decision, persist weights, simple evolutionary hill-climb trainer
+- entities.py: Player (AI-controlled), Enemy, Bullet & basic behaviors
+- utils.py: constants, helper functions
+- requirements.txt
+
+Notes
+- The AI network input is limited (nearest enemies, health, currency) and outputs movement, shooting and shop/purchase decisions.
+- The learning algorithm is intentionally simple (hill-climb mutation + keep-best) to keep the demo self-contained and deterministic.
+- Saved data: `saved_agent.npz` contains arrays for weights/biases and `saved_state.json` contains persistent upgrade state (optional).
+
+If you'd like:
+- Replace the learning algorithm with NEAT or a RL algorithm (I can add an example using neat-python or stable-baselines).
+- More enemy types, levels, procedural rooms, or visual polish.
+- A UI for shop/upgrade selection and stats display.
+
+Have fun experimenting — spawn lots of enemies and watch the AI adapt!
