@@ -1,144 +1,30 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>GH-Pages Roguelite AI Demo</title>
-  <style>
-    body { margin:0; background:#111; color:#ddd; font-family: sans-serif; }
-    #ui { position:fixed; top:8px; left:8px; z-index:10; background:rgba(0,0,0,0.6); padding:10px; border-radius:6px; width:320px; }
-    #ui h3 { margin:0 0 6px 0; font-size:14px; }
-    #ui .row { display:flex; justify-content:space-between; margin:4px 0; }
-    #ui .label { color:#9aa; font-size:12px; }
-    #ui .value { color:#fff; font-weight:600; font-size:13px; text-align:right; }
-    #log { margin-top:8px; max-height:160px; overflow:auto; background:rgba(255,255,255,0.02); padding:6px; border-radius:4px; font-size:12px; }
-    canvas { display:block; margin:0 auto; background:#222; }
-    small { color:#aaa; display:block; margin-top:4px; }
-    .muted { color:#888; font-size:12px; }
-    .instr-box { font-size:12px; color:#9df; margin-top:6px; word-break:break-word }
-  </style>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Roguelite — You Spawn Enemies, AI Controls Player</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <div id="ui">
-    <h3>AI Controller</h3>
-
-    <div class="row"><div class="label">Instructions</div><div id="instrText" class="value">loading…</div></div>
-    <div class="instr-box" id="instrNote">Edit instructions.json in the repo to change behavior.</div>
-
-    <hr style="border:none;border-top:1px solid rgba(255,255,255,0.06);margin:8px 0">
-
-    <div class="row"><div class="label">Goal</div><div id="goalText" class="value">—</div></div>
-    <div class="row"><div class="label">Current Action</div><div id="actionText" class="value">—</div></div>
-    <div class="row"><div class="label">Reason</div><div id="reasonText" class="value">—</div></div>
-    <div class="row"><div class="label">Target</div><div id="targetText" class="value">—</div></div>
-    <div class="row"><div class="label">Player Health</div><div id="healthText" class="value">—</div></div>
-
-    <div style="margin-top:8px; display:flex; gap:6px;">
-      <button id="pauseBtn">Pause</button>
-      <button id="clearLogBtn">Clear Log</button>
+    <h1>Roguelite — You Spawn Enemies, AI Controls Player</h1>
+    <div class="row">
+      <button id="btn-save">Save AI</button>
+      <button id="btn-load">Load AI</button>
+      <button id="btn-export">Export AI</button>
+      <input id="file-import" type="file" accept=".json" style="display:none" />
+      <button id="btn-toggle-train">Toggle Training</button>
+      <span id="status">Status: ready</span>
     </div>
-
-    <div id="log" aria-live="polite"></div>
+    <div class="row small">
+      Controls: 1=melee 2=ranged 3=fast (spawn at mouse). Toggling training runs background episodes. S-save, L-load, Export/Import JSON.
+    </div>
+    <div class="row small" id="hud"></div>
   </div>
 
-  <canvas id="game" width="640" height="480"></canvas>
+  <canvas id="game" width="960" height="640"></canvas>
 
-  <script src="game.js"></script>
-  <script src="ai.js"></script>
-  <script>
-    // Start the game
-    window.addEventListener('load', () => {
-      const canvas = document.getElementById('game');
-      const ctx = canvas.getContext('2d');
-
-      const uiInstr = document.getElementById('instrText');
-      const uiNote = document.getElementById('instrNote');
-      const uiGoal = document.getElementById('goalText');
-      const uiAction = document.getElementById('actionText');
-      const uiReason = document.getElementById('reasonText');
-      const uiTarget = document.getElementById('targetText');
-      const uiHealth = document.getElementById('healthText');
-      const uiLog = document.getElementById('log');
-
-      const pauseBtn = document.getElementById('pauseBtn');
-      const clearLogBtn = document.getElementById('clearLogBtn');
-
-      const game = new Game(canvas.width, canvas.height);
-      const agent = new Agent(game.player);
-
-      let paused = false;
-      pauseBtn.addEventListener('click', () => {
-        paused = !paused;
-        pauseBtn.textContent = paused ? 'Resume' : 'Pause';
-      });
-      clearLogBtn.addEventListener('click', () => {
-        agent.clearLog();
-        renderLog();
-      });
-
-      // Game loop
-      let last = performance.now();
-      function loop(now) {
-        const dt = Math.min(50, now - last) / 1000;
-        last = now;
-
-        // Periodically fetch instructions.json (every 3s)
-        const t = performance.now();
-        if (!window._lastInstrFetch || t - window._lastInstrFetch > 3000) {
-          fetch('instructions.json', {cache:'no-cache'}).then(r => {
-            if (!r.ok) throw new Error('fetch failed');
-            return r.json();
-          }).then(data => {
-            uiInstr.textContent = (data && data.text) ? data.text : JSON.stringify(data);
-            agent.setInstructions(data);
-          }).catch(e => {
-            uiInstr.textContent = 'error fetching instructions';
-          });
-          window._lastInstrFetch = t;
-        }
-
-        if (!paused) {
-          // Agent decides action and updates player
-          agent.tick(game, dt);
-
-          // Update game (enemies, resource pickups, damage)
-          game.update(dt);
-        }
-
-        // Render
-        ctx.clearRect(0,0,canvas.width,canvas.height);
-        game.render(ctx);
-
-        // Update UI with agent status
-        const status = agent.getStatus();
-        uiGoal.textContent = status.goal || '—';
-        uiAction.textContent = status.action || '—';
-        uiReason.textContent = status.reason || '—';
-        uiTarget.textContent = status.target || '—';
-        uiHealth.textContent = Math.round(game.player.health);
-
-        // Log rendering (only append new entries)
-        renderLog();
-
-        requestAnimationFrame(loop);
-      }
-      requestAnimationFrame(loop);
-
-      // render log from agent.history
-      let lastLogLen = 0;
-      function renderLog() {
-        const hist = agent.getHistory();
-        if (hist.length === lastLogLen) return;
-        lastLogLen = hist.length;
-        uiLog.innerHTML = '';
-        for (let i = hist.length - 1; i >= 0; i--) {
-          const e = hist[i];
-          const el = document.createElement('div');
-          el.className = 'muted';
-          el.textContent = `[${new Date(e.t).toLocaleTimeString()}] ${e.text}`;
-          uiLog.appendChild(el);
-        }
-      }
-    });
-  </script>
+  <script type="module" src="main.js"></script>
 </body>
 </html>
