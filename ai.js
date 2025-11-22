@@ -1,249 +1,155 @@
-// Client-side instruction interpreter + agent/fallback FSM with explanation/status reporting.
-// No server. Adds a simple "why" for each decision and keeps a short history log.
+// ai.js - simple one-hidden-layer neural agent with evolution & persistence
+export class NeuralAgent {
+  constructor(opts = {}) {
+    this.inputSize = opts.inputSize || 14;
+    this.hiddenSize = opts.hiddenSize || 32;
+    this.outputSize = opts.outputSize || 5;
+    this.sigma = opts.sigma || 0.12;
 
-class Agent {
-  constructor(player) {
-    this.player = player;
-    this.currentGoal = { type: 'wander' }; // e.g., {type:'collect',target:'resources', until:{health:60}}
-    this.instructionText = '';
-    this.goalTimeout = 0;
-    this.fsmState = { current: 'idle' };
+    // initialize weights
+    this.W1 = randMatrix(this.hiddenSize, this.inputSize, 0.5);
+    this.b1 = new Float32Array(this.hiddenSize);
+    this.W2 = randMatrix(this.outputSize, this.hiddenSize, 0.5);
+    this.b2 = new Float32Array(this.outputSize);
 
-    // For UI & debug
-    this.lastAction = null;
-    this.lastReason = null;
-    this.lastTargetDesc = null;
-    this.history = []; // { t: Date.now(), text: "..." }
-    this.maxHistory = 200;
+    this.bestFitness = -1e9;
+    this.state = { upgrades: {} };
+
+    this.loadIfExists();
   }
 
-  setInstructions(instr) {
-    if (!instr) return;
-    const text = instr.text || JSON.stringify(instr);
-    if (text !== this.instructionText) {
-      this.instructionText = text;
-      this.currentGoal = interpretInstructionText(text);
-      this._pushLog(`New instructions: "${text}" -> goal=${this.currentGoal.type}`);
+  forward(x) {
+    // x: Float32Array length inputSize
+    const h = new Float32Array(this.hiddenSize);
+    for (let i = 0; i < this.hiddenSize; i++) {
+      let s = this.b1[i];
+      const row = this.W1[i];
+      for (let j = 0; j < this.inputSize; j++) s += row[j] * x[j];
+      h[i] = Math.tanh(s);
     }
+    const out = new Float32Array(this.outputSize);
+    for (let i = 0; i < this.outputSize; i++) {
+      let s = this.b2[i];
+      const row = this.W2[i];
+      for (let j = 0; j < this.hiddenSize; j++) s += row[j] * h[j];
+      out[i] = s;
+    }
+    return out;
   }
 
-  tick(game, dt) {
-    // Check high-level "until" conditions
-    if (this.currentGoal.until) {
-      const u = this.currentGoal.until;
-      if (u.health !== undefined) {
-        if (game.player.health >= u.health) {
-          this._pushLog(`Goal satisfied: health >= ${u.health}. Switching to idle.`);
-          this.currentGoal = { type: 'idle' };
-        }
-      }
-    }
-
-    // Decision frequency
-    this.goalTimeout -= dt;
-    if (this.goalTimeout <= 0) {
-      this.goalTimeout = 0.18; // plan every ~180ms
-      const plan = this.plan(game);
-      this.execute(plan, game, dt);
-    } else {
-      // continue executing current movement
-      this.continueMovement(dt);
-    }
+  decide(inputs) {
+    // inputs: JS array
+    const x = new Float32Array(this.inputSize);
+    for (let i = 0; i < this.inputSize; i++) x[i] = inputs[i] || 0;
+    const out = this.forward(x);
+    const moveX = Math.tanh(out[0] || 0);
+    const moveY = Math.tanh(out[1] || 0);
+    const shoot = 1 / (1 + Math.exp(-(out[2] || 0)));
+    const shopVal = out[3] || 0;
+    return { move: [moveX, moveY], shootProb: shoot, shopValue: shopVal };
   }
 
-  plan(game) {
-    // Reset explanation fields; plan() will populate them
-    this.lastReason = '';
-    this.lastTargetDesc = '';
-
-    // If low health -> flee
-    if (game.player.health < 25) {
-      const nearest = this.findNearest(game.enemies);
-      if (nearest) {
-        this.lastReason = `Low health (${Math.round(game.player.health)}). Flee from nearest enemy at (${Math.round(nearest.x)},${Math.round(nearest.y)}).`;
-        this.lastTargetDesc = `enemy @ ${Math.round(nearest.x)},${Math.round(nearest.y)}`;
-        return { action: 'flee', target: nearest };
-      } else {
-        this.lastReason = `Low health but no enemy found; idle to preserve health.`;
-        return { action: 'idle' };
-      }
-    }
-
-    // Goal: collect resources
-    if (this.currentGoal.type === 'collect') {
-      if (game.resources.length) {
-        const nearestRes = this.findNearest(game.resources);
-        if (nearestRes) {
-          this.lastReason = `Goal=collect. Nearest resource at (${Math.round(nearestRes.x)},${Math.round(nearestRes.y)}). Moving to pick up.`;
-          this.lastTargetDesc = `resource @ ${Math.round(nearestRes.x)},${Math.round(nearestRes.y)}`;
-          return { action: 'move_to_entity', target: nearestRes };
-        }
-      }
-      this.lastReason = `Goal=collect but no visible resources; wandering to find resources.`;
-      return { action: 'wander' };
-    }
-
-    // Goal: avoid an area
-    if (this.currentGoal.type === 'avoid') {
-      if (this.currentGoal.area) {
-        this.lastReason = `Goal=avoid area "${this.currentGoal.area.note}" radius=${this.currentGoal.area.r}. Moving away.`;
-        this.lastTargetDesc = `avoid center ${this.currentGoal.area.x},${this.currentGoal.area.y} r=${this.currentGoal.area.r}`;
-        return { action: 'avoid_area', area: this.currentGoal.area };
-      }
-      this.lastReason = `Goal=avoid but area unknown; idling.`;
-      return { action: 'idle' };
-    }
-
-    // Idle or other goals -> wander by default
-    if (this.currentGoal.type === 'idle') {
-      this.lastReason = `Idle goal. Minimal movement to stay safe.`;
-      return { action: 'wander' };
-    }
-
-    // Default fallback
-    this.lastReason = `Default fallback: wander.`;
-    return { action: 'wander' };
+  mutate(scale = undefined) {
+    const s = (scale !== undefined) ? scale : this.sigma;
+    perturbMatrix(this.W1, s);
+    perturbArray(this.b1, s);
+    perturbMatrix(this.W2, s);
+    perturbArray(this.b2, s);
   }
 
-  execute(plan, game, dt) {
-    if (!plan) return;
-    switch(plan.action) {
-      case 'flee':
-        this.player.target = { type: 'flee', entity: plan.target };
-        this.lastAction = 'flee';
-        break;
-      case 'move_to_entity':
-        this.player.target = { type: 'move_to', entity: plan.target };
-        this.lastAction = 'move_to_entity';
-        break;
-      case 'avoid_area':
-        const a = plan.area;
-        const dx = this.player.x - a.x, dy = this.player.y - a.y;
-        const d = Math.hypot(dx,dy) || 1;
-        const tx = this.player.x + (dx/d)*100, ty = this.player.y + (dy/d)*100;
-        this.player.target = { type: 'move_to_point', x: tx, y: ty };
-        this.lastAction = 'avoid_area';
-        break;
-      case 'idle':
-        this.player.target = null;
-        this.lastAction = 'idle';
-        break;
-      case 'wander':
-      default:
-        if (!this.player.target || this.player.target.type !== 'wander' || Math.random() < 0.18) {
-          const tx2 = Math.random()*game.w, ty2 = Math.random()*game.h;
-          this.player.target = { type:'wander', x:tx2, y:ty2 };
-        }
-        this.lastAction = 'wander';
-        break;
-    }
-
-    // If plan included a target entity, make a readable target string
-    if (plan.target && plan.target.x !== undefined) {
-      this.lastTargetDesc = `${plan.target.constructor.name} @ ${Math.round(plan.target.x)},${Math.round(plan.target.y)}`;
-    } else if (plan.area) {
-      this.lastTargetDesc = `area ${plan.area.x},${plan.area.y} r=${plan.area.r}`;
-    }
-
-    // push a short log entry
-    this._pushLog(`Action=${this.lastAction} Goal=${this.currentGoal.type} Reason="${this.lastReason}" Target=${this.lastTargetDesc || '—'}`);
-    // continue movement a bit this tick
-    this.continueMovement(dt);
-  }
-
-  continueMovement(dt) {
-    const t = this.player.target;
-    if (!t) return;
-    if (t.type === 'move_to' || t.type === 'move_to_point') {
-      const tx = t.type === 'move_to' ? t.entity.x : t.x;
-      const ty = t.type === 'move_to' ? t.entity.y : t.y;
-      this.player.moveTowards(tx, ty, dt);
-    } else if (t.type === 'flee') {
-      if (t.entity) this.player.runAwayFrom(t.entity, dt);
-    } else if (t.type === 'wander') {
-      this.player.moveTowards(t.x, t.y, dt);
-    }
-    // clear target if reached
-    let tx = null, ty = null;
-    if (t.type === 'move_to') { tx = t.entity.x; ty = t.entity.y; }
-    else if (t.type === 'move_to_point' || t.type === 'wander') { tx = t.x; ty = t.y; }
-    if (tx !== null && Math.hypot(this.player.x - tx, this.player.y - ty) < 8) this.player.target = null;
-  }
-
-  findNearest(list) {
-    if (!list || !list.length) return null;
-    let best = list[0], bd = this.player.distTo(best);
-    for (const e of list) {
-      const d = this.player.distTo(e);
-      if (d < bd) { bd = d; best = e; }
-    }
-    return best;
-  }
-
-  // UI helpers
-  getStatus() {
+  getParams() {
     return {
-      goal: this.currentGoal.type + (this.currentGoal.target ? ` (${this.currentGoal.target})` : ''),
-      action: this.lastAction,
-      reason: this.lastReason,
-      target: this.lastTargetDesc
+      W1: matrixToArray(this.W1),
+      b1: Array.from(this.b1),
+      W2: matrixToArray(this.W2),
+      b2: Array.from(this.b2),
+      bestFitness: this.bestFitness,
+      sigma: this.sigma,
+      state: this.state
     };
   }
 
-  getHistory() {
-    return this.history.slice(-this.maxHistory);
+  setParams(p) {
+    if (p.W1) this.W1 = arrayToMatrix(p.W1);
+    if (p.b1) this.b1 = Float32Array.from(p.b1);
+    if (p.W2) this.W2 = arrayToMatrix(p.W2);
+    if (p.b2) this.b2 = Float32Array.from(p.b2);
+    if (p.bestFitness !== undefined) this.bestFitness = p.bestFitness;
+    if (p.sigma !== undefined) this.sigma = p.sigma;
+    if (p.state) this.state = p.state;
   }
 
-  clearLog() {
-    this.history = [];
+  tryUpdateBest(fitness) {
+    if (fitness > this.bestFitness) {
+      this.bestFitness = fitness;
+      this.sigma = Math.max(0.005, this.sigma * 0.96);
+      this.save();
+      return true;
+    } else {
+      this.sigma = Math.min(0.9, this.sigma * 1.02);
+      return false;
+    }
   }
 
-  _pushLog(text) {
-    this.history.push({ t: Date.now(), text });
-    if (this.history.length > this.maxHistory) this.history.shift();
+  save() {
+    const obj = this.getParams();
+    localStorage.setItem("saved_agent", JSON.stringify(obj));
+    // also create an export blob if user wants to download
+  }
+
+  loadIfExists() {
+    const raw = localStorage.getItem("saved_agent");
+    if (!raw) return;
+    try {
+      const p = JSON.parse(raw);
+      this.setParams(p);
+      console.log("Loaded agent from localStorage bestFitness=", this.bestFitness);
+    } catch (e) {
+      console.warn("Failed to parse saved agent:", e);
+    }
+  }
+
+  exportJSON() {
+    const dataStr = JSON.stringify(this.getParams());
+    return dataStr;
+  }
+
+  importJSON(jsonStr) {
+    const p = JSON.parse(jsonStr);
+    this.setParams(p);
+    this.save();
   }
 }
 
-// Very small "natural language" -> goal interpreter (no LLM)
-// Recognizes patterns like:
-// "Collect resources until health > 60"
-// "Collect ammo"
-// "Avoid area x,y,r" or "avoid fire within 50 units"
-function interpretInstructionText(text) {
-  if (!text || typeof text !== 'string') return { type:'idle' };
-  const s = text.toLowerCase();
-
-  // collect resource
-  if (s.includes('collect')) {
-    const g = { type: 'collect', target: 'resources' };
-    // parse "until health > 60"
-    const m = s.match(/until\s+health\s*([<>]=?)\s*(\d+)/);
-    if (m) {
-      const op = m[1], val = parseInt(m[2],10);
-      if (op === '>' || op === '>=' ) g.until = { health: val };
-      if (op === '<' || op === '<=') g.until = { health_below: val };
-    }
-    if (s.includes('ammo')) g.target = 'ammo';
-    return g;
+// utilities
+function randMatrix(rows, cols, scale = 0.5) {
+  const out = [];
+  for (let i = 0; i < rows; i++) {
+    const r = new Float32Array(cols);
+    for (let j = 0; j < cols; j++) r[j] = gaussian() * scale;
+    out.push(r);
   }
-
-  // avoid pattern "avoid ... within N"
-  if (s.includes('avoid')) {
-    // try to parse "within N units" and a name token
-    const m = s.match(/avoid\s+([a-z0-9 _-]+)\s+within\s+(\d+)\s*units?/);
-    if (m) {
-      const name = m[1].trim();
-      const r = parseInt(m[2],10);
-      // approximate: center at player's current coords is not known here; store note and radius
-      return { type:'avoid', area: { x:0, y:0, r: r, note: name } };
-    }
-    // fallback: avoid generic -> stay idle
-    return { type:'avoid' };
+  return out;
+}
+function perturbMatrix(mat, s) {
+  for (let i = 0; i < mat.length; i++) {
+    const row = mat[i];
+    for (let j = 0; j < row.length; j++) row[j] += gaussian() * s;
   }
-
-  // fallback: if text mentions 'idle' or 'wait'
-  if (s.includes('wait') || s.includes('idle')) return { type:'idle' };
-
-  // default: collect resources
-  return { type:'collect', target:'resources' };
+}
+function perturbArray(arr, s) {
+  for (let i = 0; i < arr.length; i++) arr[i] += gaussian() * s;
+}
+function matrixToArray(mat) {
+  return mat.map(r => Array.from(r));
+}
+function arrayToMatrix(arr) {
+  return arr.map(r => Float32Array.from(r));
+}
+// simple gaussian random (Box-Muller)
+function gaussian() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
 }
