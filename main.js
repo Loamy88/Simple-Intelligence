@@ -1,4 +1,4 @@
-// main.js - improved visuals, particles, shop overlay & retina scaling
+// main.js - improved visuals, particles, shop overlay & retina scaling (fixed bullet.update bounds)
 import { NeuralAgent } from './ai.js';
 import { Player, Enemy, Bullet } from './entities.js';
 
@@ -13,8 +13,8 @@ let DPR = Math.max(1, window.devicePixelRatio || 1);
 function resizeCanvas() {
   // keep logical size but scale for DPR
   const rect = canvas.getBoundingClientRect();
-  const cssW = Math.floor(rect.width);
-  const cssH = Math.floor((canvas.height / canvas.width) * cssW);
+  const cssW = Math.floor(rect.width) || canvas.width;
+  const cssH = Math.floor((canvas.height / canvas.width) * cssW) || canvas.height;
   canvas.style.width = cssW + "px";
   canvas.style.height = cssH + "px";
   W = canvas.width = cssW * DPR;
@@ -121,7 +121,7 @@ function updateParticles(dt){
 function drawParticles(ctx){
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  for(const p of particles){
+  for (const p of particles){
     const t = 1 - (p.age / p.life);
     ctx.globalAlpha = t;
     ctx.fillStyle = p.color;
@@ -259,9 +259,12 @@ function stepSimulation(dt){
   }
 
   // bullets update
+  const bounds = { w: canvas.width/DPR, h: canvas.height/DPR };
   for (let i = bullets.length-1; i>=0; i--){
     const b = bullets[i];
-    b.update(dt);
+    b.update(1/60 /*dt placeholder*/, bounds); // update with bounds for safety; we'll call it with dt directly below
+    // actually call with the real dt to move bullets
+    b.update(dt, bounds);
     if (!b.alive) { bullets.splice(i,1); continue; }
     // collision bullets -> enemies
     if (b.owner === player){
@@ -476,6 +479,7 @@ function runHeadlessEpisode(maxTime=30){
   const p = new Player((canvas.width/DPR)/2, (canvas.height/DPR)/2, savedParams.state || {upgrades:{}});
   let bs = [], es = [];
   let t = 0, spawnTimer = 0;
+  const bounds = { w: canvas.width/DPR, h: canvas.height/DPR };
   while (t < maxTime && p.alive) {
     const dt = 1/60; t += dt;
     spawnTimer -= dt;
@@ -499,7 +503,7 @@ function runHeadlessEpisode(maxTime=30){
     let mx = Math.tanh(out[0]||0), my = Math.tanh(out[1]||0);
     const l = Math.hypot(mx,my); if (l > 1e-6){ mx/=l; my/=l; }
     p.x += mx * p.moveSpeed * dt; p.y += my * p.moveSpeed * dt;
-    p.x = clamp(p.x, 0, canvas.width/DPR); p.y = clamp(p.y, 0, canvas.height/DPR);
+    p.x = clamp(p.x, 0, bounds.w); p.y = clamp(p.y, 0, bounds.h);
     p.fireTimer = Math.max(0, p.fireTimer - dt);
     const shootProb = 1/(1+Math.exp(-(out[2]||0)));
     if (shootProb > 0.55 && p.fireTimer <= 1e-6){
@@ -511,8 +515,8 @@ function runHeadlessEpisode(maxTime=30){
       }
     }
     // bullets update simplified
-    for (let i = bs.length-1; i>=0; i--){
-      const b = bs[i]; b.update(dt);
+    for (let i = bs.length-1;i>=0;i--){
+      const b = bs[i]; b.update(dt, bounds);
       if (!b.alive){ bs.splice(i,1); continue; }
       if (b.owner === p){
         for (let j = es.length-1; j>=0; j--){
