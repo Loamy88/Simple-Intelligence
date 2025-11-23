@@ -1,203 +1,397 @@
-// main.js - improved visuals, particles, shop overlay & retina scaling (fixed bullet.update bounds)
+// main.js - Single program with: Auto-Training mode (fast headless training + save) and Play mode (player spawns enemies & spends points).
+// - Auto-Training: runs accelerated headless episodes continuously and saves improved weights to localStorage.
+// - Play Mode: loads saved weights and lets player spawn enemies using points. The game is paused until Start is pressed.
+
 import { NeuralAgent } from './ai.js';
 import { Player, Enemy, Bullet } from './entities.js';
 
 const canvas = document.getElementById('game');
-const ctx = canvas.getContext('2d', { alpha: false });
-const hudEl = document.getElementById('hud');
+const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
+const trainStatsEl = document.getElementById('train-stats');
+const aiStatsEl = document.getElementById('ai-stats');
+const playerPointsEl = document.getElementById('player-points');
 
-let W = canvas.width, H = canvas.height;
 let DPR = Math.max(1, window.devicePixelRatio || 1);
-
 function resizeCanvas() {
-  // keep logical size but scale for DPR
   const rect = canvas.getBoundingClientRect();
-  const cssW = Math.floor(rect.width) || canvas.width;
-  const cssH = Math.floor((canvas.height / canvas.width) * cssW) || canvas.height;
-  canvas.style.width = cssW + "px";
-  canvas.style.height = cssH + "px";
-  W = canvas.width = cssW * DPR;
-  H = canvas.height = cssH * DPR;
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0); // draw in CSS px space with DPR scaling
+  canvas.width = Math.floor(rect.width * DPR) || 960;
+  canvas.height = Math.floor(rect.height * DPR) || 640;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 }
-window.addEventListener('resize', () => { resizeCanvas(); });
+canvas.style.width = '720px';
+canvas.style.height = '480px';
 resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
 
-// game state
-const MAX_NEAREST = 3;
-const SHOP_INTERVAL = 18.0;
-const SHOP_DURATION = 4.0;
-const SHOP_OPTIONS = [
-  {name: "Max Health +20", key: "max_health", amount: 20, cost: 30},
-  {name: "Damage +6", key: "damage", amount: 6, cost: 40},
-  {name: "Speed +20", key: "speed", amount: 20, cost: 35},
-  {name: "Fire Rate +1", key: "firerate", amount: 1, cost: 45},
-];
+// modes
+const MODE_TRAIN = 'train';
+const MODE_PLAY = 'play';
+let mode = MODE_TRAIN;
 
-let agent = new NeuralAgent({inputSize:14, hiddenSize:32, outputSize:5});
-let player = new Player(480, 320, agent.state);
+// agent & game state
+const INPUT_SIZE = 14;
+let agent = new NeuralAgent({ inputSize: INPUT_SIZE, hiddenSize: 48, outputSize: 5, sigma: 0.12 });
+
+let aiPlayer = new Player(360, 240, agent.state); // AI-controlled entity used both in training & play
 let bullets = [];
 let enemies = [];
 let particles = [];
-let lastTime = performance.now();
-let training = false;
-let shopTimer = SHOP_INTERVAL;
-let shopOpen = false;
-let shopTimeLeft = 0;
-let episodeTime = 0;
-let mouse = {x: 480, y: 320};
+
+let running = false; // for play mode run simulation
+let trainingActive = false; // background auto-train
+let headlessInterval = null;
+
+let playerPoints = 100; // points the human may spend to spawn enemies in Play mode
+
+// shop options used by agent
+const SHOP_OPTIONS = [
+  { name: "Max Health +20", key: "max_health", amount: 20, cost: 30, value: 20, repeatable: true, priority: 1.0 },
+  { name: "Damage +6", key: "damage", amount: 6, cost: 40, value: 6, repeatable: true, priority: 1.2 },
+  { name: "Speed +20", key: "speed", amount: 20, cost: 35, value: 20, repeatable: true, priority: 1.0 },
+  { name: "Fire Rate +1", key: "firerate", amount: 1, cost: 45, value: 1, repeatable: true, priority: 1.1 },
+  { name: "Multi-Shot +1", key: "multishot", amount: 1, cost: 60, value: 1, repeatable: true, priority: 1.6 },
+  { name: "Pierce +1", key: "pierce", amount: 1, cost: 55, value: 1, repeatable: true, priority: 1.3 },
+  { name: "Heal Charge +1", key: "heal", amount: 1, cost: 50, value: 1, repeatable: true, priority: 1.0 }
+];
 
 // UI wiring
-document.getElementById('btn-save').onclick = () => { agent.save(); statusEl.textContent = "Status: saved to localStorage"; };
-document.getElementById('btn-load').onclick = () => { agent.loadIfExists(); player.applyState(agent.state); statusEl.textContent = "Status: loaded"; };
-document.getElementById('btn-export').onclick = () => {
+document.getElementById('mode-train').addEventListener('click', () => switchMode(MODE_TRAIN));
+document.getElementById('mode-play').addEventListener('click', () => switchMode(MODE_PLAY));
+
+document.getElementById('toggle-training').addEventListener('click', toggleTraining);
+document.getElementById('save-ai').addEventListener('click', () => { agent.save(); statusEl.textContent = 'Saved AI'; });
+document.getElementById('load-ai').addEventListener('click', () => { agent.loadIfExists(); aiPlayer.applyState(agent.state); statusEl.textContent = 'Loaded AI'; });
+document.getElementById('export-ai').addEventListener('click', () => {
   const data = agent.exportJSON();
-  const blob = new Blob([data], {type: 'application/json'});
+  const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
-  const a = document.createElement('a'); a.href = url; a.download='agent.json'; a.click();
-  URL.revokeObjectURL(url);
-};
-const inputFile = document.getElementById('file-import');
-inputFile.onchange = (ev) => {
+  const a = document.createElement('a'); a.href = url; a.download = 'agent.json'; a.click(); URL.revokeObjectURL(url);
+});
+document.getElementById('import-ai').addEventListener('click', () => document.getElementById('import-file').click());
+document.getElementById('import-file').addEventListener('change', (ev) => {
   const f = ev.target.files[0];
   if (!f) return;
   const r = new FileReader();
-  r.onload = () => { agent.importJSON(r.result); player.applyState(agent.state); statusEl.textContent = "Status: imported agent"; };
+  r.onload = () => { agent.importJSON(r.result); aiPlayer.applyState(agent.state); statusEl.textContent = 'Imported AI'; };
   r.readAsText(f);
-};
-document.getElementById('btn-toggle-train').onclick = () => { training = !training; statusEl.textContent = "Status: training=" + training; };
+});
+
+// play mode spawn buttons
+document.querySelectorAll('.spawn-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const kind = btn.dataset.spawn;
+    const cost = (kind === 'melee') ? 20 : (kind === 'ranged') ? 30 : 25;
+    if (mode !== MODE_PLAY) return;
+    if (playerPoints >= cost) {
+      const rect = canvas.getBoundingClientRect();
+      const mx = (rect.left + rect.width/2) - rect.left; // spawn center by default; user spawns at mouse if desired
+      const my = (rect.top + rect.height/2) - rect.top;
+      const spawnX = (canvas.width / DPR) / 2 + (Math.random()-0.5)*120;
+      const spawnY = (canvas.height / DPR) / 2 + (Math.random()-0.5)*120;
+      enemies.push(new Enemy(spawnX, spawnY, kind));
+      playerPoints -= cost;
+      updateUI();
+    } else {
+      statusEl.textContent = 'Not enough points';
+    }
+  });
+});
+
+document.getElementById('start-run').addEventListener('click', () => { running = true; document.getElementById('start-run').disabled = true; document.getElementById('pause-run').disabled = false; statusEl.textContent = 'Run started'; });
+document.getElementById('pause-run').addEventListener('click', () => { running = false; document.getElementById('start-run').disabled = false; document.getElementById('pause-run').disabled = true; statusEl.textContent = 'Paused'; });
+document.getElementById('reset-run').addEventListener('click', () => { resetPlayRun(); });
 
 canvas.addEventListener('mousemove', (e) => {
   const r = canvas.getBoundingClientRect();
   mouse.x = (e.clientX - r.left) * (canvas.width / r.width) / DPR;
   mouse.y = (e.clientY - r.top) * (canvas.height / r.height) / DPR;
 });
-window.addEventListener('keydown', (e) => {
-  if (e.key === '1' || e.key === '2' || e.key === '3') {
-    const kind = (e.key === '1') ? 'melee' : (e.key === '2') ? 'ranged' : 'fast';
-    const spawn = new Enemy(mouse.x, mouse.y, kind);
-    spawn._spawnTime = performance.now(); // for scale animation
-    enemies.push(spawn);
+// allow click to spawn at mouse for play mode
+canvas.addEventListener('click', (e) => {
+  if (mode !== MODE_PLAY) return;
+  // left click spawns cheap melee if enough points
+  if (playerPoints >= 20) {
+    const r = canvas.getBoundingClientRect();
+    const mx = (e.clientX - r.left) * (canvas.width / r.width) / DPR;
+    const my = (e.clientY - r.top) * (canvas.height / r.height) / DPR;
+    enemies.push(new Enemy(mx, my, 'melee'));
+    playerPoints -= 20;
+    updateUI();
   }
-  if (e.key === 's' || e.key === 'S') agent.save();
-  if (e.key === 'l' || e.key === 'L') { agent.loadIfExists(); player.applyState(agent.state); }
-  if (e.key === 't' || e.key === 'T') { training = !training; statusEl.textContent = "Status: training=" + training; }
 });
 
-// small helpers
-function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
-function randInt(a,b){return Math.floor(Math.random()*(b-a+1))+a;}
-function gauss(){ let u=0,v=0; while(u===0)u=Math.random(); while(v===0)v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+let mouse = { x: canvas.width / DPR / 2, y: canvas.height / DPR / 2 };
 
-// PARTICLES
-function spawnParticles(x,y,color,count=16,spread=30,life=0.6){
-  for(let i=0;i<count;i++){
-    const ang = Math.random()*Math.PI*2;
-    const sp = 0.3 + Math.random()*1.4;
-    particles.push({
-      x,y,
-      vx: Math.cos(ang)*sp*spread,
-      vy: Math.sin(ang)*sp*spread - 20*Math.random(),
-      life: life*(0.6+Math.random()*0.8),
-      age:0,
-      color,
-      size: 1.5 + Math.random()*2.8
-    });
-  }
-}
-function updateParticles(dt){
-  for(let i=particles.length-1;i>=0;i--){
-    const p = particles[i];
-    p.age += dt;
-    if(p.age >= p.life){ particles.splice(i,1); continue; }
-    p.vy += 200*dt; // gravity
-    p.x += p.vx*dt;
-    p.y += p.vy*dt;
-    p.vx *= 1 - dt*2;
-    p.vy *= 1 - dt*1.2;
-  }
-}
-function drawParticles(ctx){
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  for (const p of particles){
-    const t = 1 - (p.age / p.life);
-    ctx.globalAlpha = t;
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size * t, 0, Math.PI*2);
-    ctx.fill();
-  }
-  ctx.restore();
-}
+// switch mode UI
+function switchMode(m) {
+  mode = m;
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  if (m === MODE_TRAIN) document.getElementById('mode-train').classList.add('active');
+  else document.getElementById('mode-play').classList.add('active');
 
-// improved rendering helpers
-function drawGlowCircle(ctx, x,y,r, color, innerColor) {
-  ctx.save();
-  ctx.beginPath();
-  ctx.fillStyle = innerColor || color;
-  ctx.shadowColor = color;
-  ctx.shadowBlur = Math.max(6, r*0.9);
-  ctx.arc(x,y,r,0,Math.PI*2);
-  ctx.fill();
-  ctx.restore();
-}
+  document.getElementById('training-controls').style.display = (m === MODE_TRAIN) ? 'block' : 'none';
+  document.getElementById('play-controls').style.display = (m === MODE_PLAY) ? 'block' : 'none';
 
-function drawHealthBar(ctx, x,y, radius, health, maxHealth){
-  const w = 48, h = 6;
-  const left = x - w/2, top = y - radius - 12;
-  ctx.save();
-  // background
-  ctx.fillStyle = 'rgba(10,10,10,0.6)';
-  roundRect(ctx, left-0.5, top-0.5, w+1, h+1, 3);
-  ctx.fill();
-  // filled
-  const ratio = clamp(health/maxHealth, 0, 1);
-  ctx.fillStyle = ratio > 0.5 ? '#5be06e' : (ratio > 0.25 ? '#ffd166' : '#ff6b6b');
-  roundRect(ctx, left, top, w*ratio, h, 3);
-  ctx.fill();
-  ctx.restore();
-}
-function roundRect(ctx,x,y,w,h,r){
-  const R = r||4;
-  ctx.beginPath();
-  ctx.moveTo(x+R,y);
-  ctx.arcTo(x+w,y,x+w,y+h,R);
-  ctx.arcTo(x+w,y+h,x,y+h,R);
-  ctx.arcTo(x,y+h,x,y,R);
-  ctx.arcTo(x,y,x+w,y,R);
-  ctx.closePath();
-}
-
-// spawn ambient enemies
-function spawnAmbient(){
-  if (Math.random() < 0.85 && enemies.length < 18) {
-    const side = Math.floor(Math.random()*4);
-    let x,y;
-    if (side === 0){ x = -20; y = Math.random()*H; }
-    else if (side === 1){ x = W + 20; y = Math.random()*H; }
-    else if (side === 2){ x = Math.random()*W; y = -20; }
-    else { x = Math.random()*W; y = H + 20; }
-    const k = Math.random() < 0.45 ? 'melee' : (Math.random() < 0.8 ? 'ranged' : 'fast');
-    const e = new Enemy(x/DPR, y/DPR, k);
-    e._spawnTime = performance.now();
-    enemies.push(e);
+  if (m === MODE_PLAY) {
+    // load saved weights and prepare paused run
+    agent.loadIfExists();
+    aiPlayer = new Player((canvas.width / DPR) / 2, (canvas.height / DPR) / 2, agent.state);
+    bullets = []; enemies = []; running = false;
+    playerPoints = 100;
+    updateUI();
+    statusEl.textContent = 'Play mode loaded AI weights (paused)';
+  } else {
+    statusEl.textContent = 'Auto Train mode';
   }
 }
 
-// collectInputs same as before (14 inputs)
-function collectInputs(player, enemies){
+// toggle training loop
+function toggleTraining() {
+  trainingActive = !trainingActive;
+  document.getElementById('toggle-training').textContent = trainingActive ? 'Stop Auto-Training' : 'Start Auto-Training';
+  statusEl.textContent = trainingActive ? 'Training started' : 'Training stopped';
+  if (trainingActive) startHeadlessTrainer();
+  else stopHeadlessTrainer();
+}
+
+// headless trainer - runs short accelerated episodes repeatedly
+let trainerRunning = false;
+function startHeadlessTrainer() {
+  if (trainerRunning) return;
+  trainerRunning = true;
+  // run a continuous async loop using setTimeout to avoid blocking UI too long
+  (async function loop() {
+    while (trainerRunning) {
+      const startTime = performance.now();
+      // create candidate, mutate, run headless episode fast
+      const savedParams = agent.getParams();
+      const candidate = JSON.parse(JSON.stringify(savedParams));
+      // mutate candidate in-place
+      for (let i = 0; i < candidate.W1.length; i++) for (let j = 0; j < candidate.W1[i].length; j++) candidate.W1[i][j] += gauss() * candidate.sigma;
+      for (let i = 0; i < candidate.b1.length; i++) candidate.b1[i] += gauss() * candidate.sigma;
+      for (let i = 0; i < candidate.W2.length; i++) for (let j = 0; j < candidate.W2[i].length; j++) candidate.W2[i][j] += gauss() * candidate.sigma;
+      for (let i = 0; i < candidate.b2.length; i++) candidate.b2[i] += gauss() * candidate.sigma;
+
+      // run one headless episode (accelerated)
+      const res = runHeadlessEpisode(candidate, 10.0); // shorter for speed
+      const fitness = res.fitness;
+
+      // try update best
+      const improved = (() => {
+        agent.setParams(candidate);
+        return agent.tryUpdateBest(fitness);
+      })();
+
+      if (!improved) {
+        // revert and mutate agent slightly for next candidate
+        agent.setParams(savedParams);
+        agent.mutate();
+      } else {
+        // keep improved and persist
+        agent.save();
+      }
+
+      // update UI stats (not every iteration to avoid thrash)
+      const dur = performance.now() - startTime;
+      trainStatsEl.textContent = `Last fitness ${Math.floor(fitness)}  best ${Math.floor(agent.bestFitness)}  iter time ${Math.round(dur)}ms  sigma ${agent.sigma.toFixed(3)}`;
+      updateAIStats();
+
+      // yield to browser so UI remains responsive
+      await new Promise((r) => setTimeout(r, 12));
+    }
+  })();
+}
+
+function stopHeadlessTrainer() {
+  trainerRunning = false;
+}
+
+// runHeadlessEpisode simulates a single candidate agent and returns fitness.
+// It uses simplified sim (no rendering) and allows AI to buy during episode using the same shop options.
+function runHeadlessEpisode(params, maxTime = 20.0) {
+  const bounds = { w: canvas.width / DPR, h: canvas.height / DPR };
+  const p = new Player(bounds.w / 2, bounds.h / 2, params.state || { upgrades: {} });
+  let bs = [], es = [];
+  let t = 0, spawnTimer = 0;
+
+  // give candidate some starting gold if present
+  p.currency = 0;
+  // zero-out candidate gold to avoid weird states; training episodes will let the AI earn gold.
+  params.state = params.state || { upgrades: {} };
+  params.state.gold = params.state.gold || 0;
+
+  while (t < maxTime && p.alive) {
+    const dt = 1 / 60;
+    t += dt;
+    spawnTimer -= dt;
+    if (spawnTimer <= 0) {
+      spawnTimer = Math.max(0.25, 1.2 - t * 0.01);
+      const cnt = (Math.random() < 0.5) ? 1 : 2;
+      for (let k = 0; k < cnt; k++) {
+        const side = Math.floor(Math.random() * 4);
+        let x, y;
+        if (side === 0) { x = -30; y = Math.random() * bounds.h; }
+        else if (side === 1) { x = bounds.w + 30; y = Math.random() * bounds.h; }
+        else if (side === 2) { x = Math.random() * bounds.w; y = -30; }
+        else { x = Math.random() * bounds.w; y = bounds.h + 30; }
+        es.push(new Enemy(x, y, (Math.random() < 0.45) ? 'melee' : (Math.random() < 0.8 ? 'ranged' : 'fast')));
+      }
+    }
+
+    // decide using params (forwardWithParams helper below)
+    const inputs = collectInputs(p, es);
+    const out = forwardWithParams(params, inputs);
+    const mx = Math.tanh(out[0] || 0);
+    const my = Math.tanh(out[1] || 0);
+    const norm = Math.hypot(mx, my);
+    const nx = norm > 1e-6 ? mx / norm : 0;
+    const ny = norm > 1e-6 ? my / norm : 0;
+    p.x += nx * p.moveSpeed * dt;
+    p.y += ny * p.moveSpeed * dt;
+    p.x = clamp(p.x, 0, bounds.w); p.y = clamp(p.y, 0, bounds.h);
+
+    p.fireTimer = Math.max(0, p.fireTimer - dt);
+    const shootProb = 1 / (1 + Math.exp(-(out[2] || 0)));
+    if (shootProb > 0.55 && p.fireTimer <= 1e-6 && es.length) {
+      const en = nearest(p, es);
+      p.fireAt(en.x, en.y, bs, bounds);
+    }
+
+    // update bullets
+    for (let i = bs.length - 1; i >= 0; i--) {
+      const b = bs[i];
+      b.update(dt, bounds);
+      if (!b.alive) { bs.splice(i, 1); continue; }
+      if (b.owner === p) {
+        for (let j = es.length - 1; j >= 0; j--) {
+          const e = es[j];
+          if ((b.x - e.x) ** 2 + (b.y - e.y) ** 2 < (b.radius + e.radius) ** 2) {
+            e.health -= b.damage;
+            b.pierce -= 1;
+            if (b.pierce <= 0) b.alive = false;
+            if (e.health <= 0 && e.alive) {
+              e.alive = false; es.splice(j, 1);
+              p.kills++; p.currency += 15;
+              // candidate gets gold in params.state for shop decisions
+              params.state.gold = (params.state.gold || 0) + 15;
+            }
+            break;
+          }
+        }
+      } else {
+        // enemy bullets can damage candidate
+        if ((b.x - p.x) ** 2 + (b.y - p.y) ** 2 < (b.radius + p.radius) ** 2) {
+          p.health -= b.damage;
+          b.alive = false;
+          if (p.health <= 0) p.alive = false;
+        }
+      }
+    }
+
+    // enemies update
+    for (let i = es.length - 1; i >= 0; i--) {
+      const e = es[i];
+      e.update(dt, p, bs);
+      if ((e.x - p.x) ** 2 + (e.y - p.y) ** 2 < (e.radius + p.radius) ** 2) {
+        if (e.attackTimer <= 1e-6) {
+          p.health -= e.damage;
+          e.attackTimer = e.attackCooldown;
+          if (p.health <= 0) p.alive = false;
+        }
+      }
+    }
+
+    // shop checks: allow candidate to buy whenever it has gold >= cheapest option
+    const gold = params.state.gold || 0;
+    const minCost = Math.min(...SHOP_OPTIONS.map(o => o.cost));
+    if (gold >= minCost) {
+      // map candidate shop choice from out[3]
+      performAgentShopPurchase(params, SHOP_OPTIONS);
+    }
+
+    // optionally use heal if low and has heal charges
+    if (p.health < p.maxHealth * 0.45 && (p.healAvailable || params.state.upgrades?.heal)) {
+      // allow heal purchase usage or use of existing charge
+      if (p.useHeal()) {
+        // used heal
+      } else if ((params.state.upgrades || {}).heal > 0) {
+        // convert one upgrade to charge for immediate use
+        params.state.upgrades.heal -= 1;
+        p.healAvailable += 1;
+        p.useHeal();
+      }
+    }
+
+    p.update(dt);
+  }
+
+  const fitness = p.kills * 50.0 + t * 1.0 + p.currency * 2.0 - (p.maxHealth - p.health) * 0.5;
+  return { fitness, kills: p.kills, time: t };
+}
+
+// performAgentShopPurchase maps agent's continuous choice into sequence of buys until gold exhausted (greedy)
+function performAgentShopPurchase(params, options) {
+  const inputs = [ // minimal empty inputs for shop decision mapping; agent doesn't need full env here
+    1.0, // healthy marker
+    (params.state.gold || 0) / 200.0
+  ];
+  while (inputs.length < INPUT_SIZE) inputs.push(0);
+  // forward with params
+  const out = forwardWithParams(params, new Float32Array(inputs));
+  let shopVal = out[3] || 0;
+  // map continuous val to index
+  let idx = Math.floor(((Math.tanh(shopVal) + 1) / 2) * options.length);
+  idx = clamp(idx, 0, options.length - 1);
+  const choice = options[idx];
+  // buy as many times as possible for that option
+  while ((params.state.gold || 0) >= choice.cost) {
+    params.state.gold -= choice.cost;
+    params.state.upgrades = params.state.upgrades || {};
+    params.state.upgrades[choice.key] = (params.state.upgrades[choice.key] || 0) + choice.amount;
+  }
+}
+
+// helper: forward using param JSON
+function forwardWithParams(params, xarr) {
+  // xarr is Float32Array or numeric array length INPUT_SIZE
+  const W1 = params.W1, b1 = params.b1, W2 = params.W2, b2 = params.b2;
+  const hidden = new Float32Array(W1.length);
+  for (let i = 0; i < W1.length; i++) {
+    let s = b1[i] || 0;
+    const row = W1[i];
+    for (let j = 0; j < row.length; j++) s += row[j] * xarr[j];
+    hidden[i] = Math.tanh(s);
+  }
+  const out = new Float32Array(W2.length);
+  for (let i = 0; i < W2.length; i++) {
+    let s = b2[i] || 0;
+    const row = W2[i];
+    for (let j = 0; j < row.length; j++) s += row[j] * hidden[j];
+    out[i] = s;
+  }
+  return out;
+}
+
+// helpers
+function nearest(p, arr) {
+  return arr.reduce((a, b) => ((a.x - p.x) ** 2 + (a.y - p.y) ** 2) < ((b.x - p.x) ** 2 + (b.y - p.y) ** 2) ? a : b);
+}
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function gauss() { let u=0,v=0; while(u===0)u=Math.random(); while(v===0)v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+
+// Collect inputs for live agent decision (used in Play)
+function collectInputs(player, enemies) {
   const inputs = [];
   inputs.push(player.health / Math.max(1, player.maxHealth));
-  inputs.push(player.currency / 100.0);
-  const sorted = enemies.slice().sort((a,b) => ((a.x-player.x)**2+(a.y-player.y)**2) - ((b.x-player.x)**2+(b.y-player.y)**2));
-  for (let i=0;i<MAX_NEAREST;i++){
-    if (i < sorted.length){
+  inputs.push(player.currency / 200.0); // normalize
+  const sorted = enemies.slice().sort((a, b) => ((a.x - player.x) ** 2 + (a.y - player.y) ** 2) - ((b.x - player.x) ** 2 + (b.y - player.y) ** 2));
+  for (let i = 0; i < 3; i++) {
+    if (i < sorted.length) {
       const e = sorted[i];
-      inputs.push((e.x - player.x) / (canvas.width/DPR));
-      inputs.push((e.y - player.y) / (canvas.height/DPR));
-      const d = Math.hypot((e.x-player.x)/(canvas.width/DPR), (e.y-player.y)/(canvas.height/DPR));
+      inputs.push((e.x - player.x) / (canvas.width / DPR));
+      inputs.push((e.y - player.y) / (canvas.height / DPR));
+      const d = Math.hypot((e.x - player.x) / (canvas.width / DPR), (e.y - player.y) / (canvas.height / DPR));
       inputs.push(d);
       let kind_code = 0;
       if (e.kind === 'melee') kind_code = 0.0;
@@ -205,358 +399,327 @@ function collectInputs(player, enemies){
       else if (e.kind === 'fast') kind_code = 1.0;
       inputs.push(kind_code);
     } else {
-      inputs.push(0,0,0,0);
+      inputs.push(0, 0, 0, 0);
     }
   }
-  while (inputs.length < 14) inputs.push(0);
-  return inputs.slice(0,14);
+  while (inputs.length < INPUT_SIZE) inputs.push(0);
+  return inputs.slice(0, INPUT_SIZE);
 }
 
-// open shop but now we show visual overlay (shopOpen controls it)
-function openShopAndApply() {
-  const inputs = collectInputs(player, enemies);
+// Play mode helpers & simulation
+function stepPlay(dt) {
+  // AI uses agent.forward on saved weights (agent currently loaded)
+  const inputs = collectInputs(aiPlayer, enemies);
   const decision = agent.decide(inputs);
-  const val = decision.shopValue;
-  let idx = Math.floor(((Math.tanh(val)+1)/2) * SHOP_OPTIONS.length);
-  idx = clamp(idx,0,SHOP_OPTIONS.length-1);
-  const opt = SHOP_OPTIONS[idx];
-  if (player.currency >= opt.cost) {
-    const up = agent.state.upgrades || {};
-    up[opt.key] = (up[opt.key] || 0) + opt.amount;
-    agent.state.upgrades = up;
-    player.currency -= opt.cost;
-    player.applyState(agent.state);
-    // spawn subtle particles to celebrate purchase
-    spawnParticles(player.x, player.y, '#7ef3b6', 22, 40, 0.8);
-    return {ok:true, opt, idx};
-  }
-  return {ok:false, opt, idx};
-}
-
-// main update logic (similar to previous but with visual polish)
-function stepSimulation(dt){
-  // agent decision
-  const inputs = collectInputs(player, enemies);
-  const dec = agent.decide(inputs);
-  let mx = dec.move[0], my = dec.move[1];
-  const l = Math.hypot(mx,my);
+  let mx = decision.move[0], my = decision.move[1];
+  const l = Math.hypot(mx, my);
   if (l > 1e-6) { mx /= l; my /= l; }
-  player.x += mx * player.moveSpeed * dt;
-  player.y += my * player.moveSpeed * dt;
-  player.x = clamp(player.x, 0, canvas.width/DPR); player.y = clamp(player.y, 0, canvas.height/DPR);
+  aiPlayer.x += mx * aiPlayer.moveSpeed * dt;
+  aiPlayer.y += my * aiPlayer.moveSpeed * dt;
+  aiPlayer.x = clamp(aiPlayer.x, 0, canvas.width / DPR); aiPlayer.y = clamp(aiPlayer.y, 0, canvas.height / DPR);
 
   // shooting
-  player.fireTimer = Math.max(0, player.fireTimer - dt);
-  if (dec.shootProb > 0.55 && player.fireTimer <= 1e-6) {
-    if (enemies.length) {
-      const en = enemies.reduce((a,b)=> ((a.x-player.x)**2+(a.y-player.y)**2) < ((b.x-player.x)**2+(b.y-player.y)**2) ? a : b);
-      const dx = en.x - player.x, dy = en.y - player.y;
-      const dd = Math.hypot(dx,dy) + 1e-6;
-      const vx = dx/dd, vy = dy/dd;
-      bullets.push(new Bullet(player.x + vx*(player.radius+6), player.y + vy*(player.radius+6), vx, vy, player, player.damage, 420));
-      player.fireTimer = player.fireCooldown;
-    }
+  aiPlayer.fireTimer = Math.max(0, aiPlayer.fireTimer - dt);
+  if (decision.shootProb > 0.55 && aiPlayer.fireTimer <= 1e-6 && enemies.length) {
+    const en = nearest(aiPlayer, enemies);
+    aiPlayer.fireAt(en.x, en.y, bullets, { w: canvas.width / DPR, h: canvas.height / DPR });
   }
 
   // bullets update
-  const bounds = { w: canvas.width/DPR, h: canvas.height/DPR };
-  for (let i = bullets.length-1; i>=0; i--){
+  const bounds = { w: canvas.width / DPR, h: canvas.height / DPR };
+  for (let i = bullets.length - 1; i >= 0; i--) {
     const b = bullets[i];
-    b.update(1/60 /*dt placeholder*/, bounds); // update with bounds for safety; we'll call it with dt directly below
-    // actually call with the real dt to move bullets
     b.update(dt, bounds);
-    if (!b.alive) { bullets.splice(i,1); continue; }
-    // collision bullets -> enemies
-    if (b.owner === player){
-      for (let j = enemies.length-1; j>=0; j--){
+    if (!b.alive) { bullets.splice(i, 1); continue; }
+    if (b.owner === aiPlayer) {
+      for (let j = enemies.length - 1; j >= 0; j--) {
         const e = enemies[j];
-        if ((b.x - e.x)**2 + (b.y - e.y)**2 < (b.radius+e.radius)**2){
+        if ((b.x - e.x) ** 2 + (b.y - e.y) ** 2 < (b.radius + e.radius) ** 2) {
           e.health -= b.damage;
-          b.alive = false;
-          spawnParticles(b.x, b.y, '#ffd83a', 6, 16, 0.35);
-          if (e.health <= 0 && e.alive){
-            e.alive = false;
-            // death pop
-            spawnParticles(e.x, e.y, '#ff9aa2', 22, 36, 0.9);
-            enemies.splice(j,1);
-            player.kills += 1;
-            player.currency += 15;
+          b.pierce -= 1;
+          if (b.pierce <= 0) b.alive = false;
+          if (e.health <= 0 && e.alive) {
+            e.alive = false; enemies.splice(j, 1);
+            aiPlayer.kills++; aiPlayer.currency += 15;
+            // AI also accumulates gold in agent.state for shop loops
+            agent.state.gold = (agent.state.gold || 0) + 15;
           }
           break;
         }
       }
     } else {
-      // enemy bullet hit player
-      if ((b.x - player.x)**2 + (b.y - player.y)**2 < (b.radius + player.radius)**2){
-        player.health -= b.damage;
+      // enemy bullet hit player (in play mode enemies belong to human)
+      if ((b.x - aiPlayer.x) ** 2 + (b.y - aiPlayer.y) ** 2 < (b.radius + aiPlayer.radius) ** 2) {
+        aiPlayer.health -= b.damage;
         b.alive = false;
-        spawnParticles(player.x, player.y, '#ff6b6b', 10, 30, 0.5);
-        if (player.health <= 0) player.alive = false;
+        if (aiPlayer.health <= 0) aiPlayer.alive = false;
       }
     }
   }
 
   // enemies update
-  for (let i = enemies.length-1; i>=0; i--){
+  for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
-    e.update(dt, player, bullets);
-    // melee collision damage
-    if ((e.x - player.x)**2 + (e.y - player.y)**2 < (e.radius + player.radius)**2) {
+    e.update(dt, aiPlayer, bullets);
+    if ((e.x - aiPlayer.x) ** 2 + (e.y - aiPlayer.y) ** 2 < (e.radius + aiPlayer.radius) ** 2) {
       if (e.attackTimer <= 1e-6) {
-        player.health -= e.damage;
+        aiPlayer.health -= e.damage;
         e.attackTimer = e.attackCooldown;
-        spawnParticles(player.x + (Math.random()-0.5)*8, player.y + (Math.random()-0.5)*8, '#ff6b6b', 8, 20, 0.5);
-        if (player.health <= 0) player.alive = false;
+        if (aiPlayer.health <= 0) aiPlayer.alive = false;
       }
     }
   }
 
-  // shop timing
-  shopTimer -= dt;
-  if (shopTimer <= 0 && !shopOpen) {
-    shopOpen = true;
-    shopTimeLeft = SHOP_DURATION;
-    shopTimer = SHOP_INTERVAL;
-    // show overlay for SHOP_DURATION and attempt AI decision visually when it opens
-    const r = openShopAndApply(); // will attempt purchase and create particles if bought
-    shopOpen = true; // keep overlay while shopTimeLeft > 0
-    // store result for overlay
-    shopOverlayCache = r;
-  }
-  if (shopOpen) {
-    shopTimeLeft -= dt;
-    if (shopTimeLeft <= 0) shopOpen = false;
+  // AI shop: allow AI to buy as much as possible while the run is active (immediate buys)
+  if ((agent.state.gold || 0) >= Math.min(...SHOP_OPTIONS.map(o => o.cost))) {
+    const bought = agent.shopBuyLoop(JSON.parse(JSON.stringify(SHOP_OPTIONS)));
+    if (bought.length > 0) {
+      // apply upgrades to aiPlayer immediately
+      aiPlayer.applyState(agent.state);
+      agent.save();
+    }
   }
 
-  player.update(dt);
-  updateParticles(dt);
+  // AI heal usage if low
+  if (aiPlayer.health < aiPlayer.maxHealth * 0.45) {
+    aiPlayer.useHeal();
+  }
+
+  aiPlayer.update(dt);
 }
 
-// render
-function render(){
-  // clear
-  ctx.clearRect(0,0,canvas.width/DPR, canvas.height/DPR);
-  // subtle vignette background
-  const g = ctx.createLinearGradient(0,0,0,canvas.height/DPR);
-  g.addColorStop(0,'#0f1216'); g.addColorStop(1,'#0b0d11');
-  ctx.fillStyle = g;
-  ctx.fillRect(0,0,canvas.width/DPR, canvas.height/DPR);
+// reset play run
+function resetPlayRun() {
+  aiPlayer = new Player((canvas.width / DPR) / 2, (canvas.height / DPR) / 2, agent.state);
+  bullets = []; enemies = []; running = false; playerPoints = 100;
+  document.getElementById('start-run').disabled = false;
+  document.getElementById('pause-run').disabled = true;
+  updateUI();
+}
 
-  // draw bullets with glow
-  ctx.save();
-  ctx.globalCompositeOperation = 'lighter';
-  for (const b of bullets) {
-    drawGlowCircle(ctx, b.x, b.y, b.radius*1.8, '#ffd83a', '#fff3bf');
+// simple spawn ambient for training render (not used in headless)
+function spawnAmbient() {
+  if (Math.random() < 0.02 && enemies.length < 18) {
+    const side = Math.floor(Math.random() * 4);
+    let x, y;
+    if (side === 0) { x = -20; y = Math.random() * (canvas.height / DPR); }
+    else if (side === 1) { x = (canvas.width / DPR) + 20; y = Math.random() * (canvas.height / DPR); }
+    else if (side === 2) { x = Math.random() * (canvas.width / DPR); y = -20; }
+    else { x = Math.random() * (canvas.width / DPR); y = (canvas.height / DPR) + 20; }
+    enemies.push(new Enemy(x, y, (Math.random() < 0.45) ? 'melee' : (Math.random() < 0.8 ? 'ranged' : 'fast')));
   }
-  ctx.restore();
+}
 
-  // draw enemies (with spawn scale and glow)
-  for (const e of enemies) {
-    const spawnAge = e._spawnTime ? (performance.now() - e._spawnTime)/300 : 1;
-    const s = clamp(spawnAge, 0, 1);
-    const scale = 0.6 + 0.4*s;
-    const ex = e.x, ey = e.y, r = e.radius * scale;
-    const color = e.color || '#dc5a5a';
-    // shadowed core
-    drawGlowCircle(ctx, ex, ey, r, color, color);
-    // inner highlight
-    ctx.save();
-    ctx.globalCompositeOperation = 'source-over';
+// rendering + main loop
+function render() {
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#071018';
+  ctx.fillRect(0, 0, W, H);
+
+  // draw enemies
+  for (const e of enemies) e.draw(ctx);
+  // bullets
+  for (const b of bullets) b.draw(ctx);
+  // ai player
+  aiPlayer.draw(ctx);
+
+  // overlay text
+  ctx.fillStyle = '#cfeff8';
+  ctx.font = '14px Inter, Arial';
+  ctx.fillText(`Mode: ${mode}  AI best fitness: ${Math.floor(agent.bestFitness)}`, 10, 18);
+  ctx.fillText(`AI gold: ${agent.state.gold || 0}  AI kills: ${aiPlayer.kills}`, 10, 36);
+  // draw paused message in play mode
+  if (mode === MODE_PLAY && !running) {
     ctx.fillStyle = 'rgba(255,255,255,0.06)';
-    ctx.beginPath(); ctx.ellipse(ex - r*0.3, ey - r*0.45, r*0.35, r*0.25, 0, 0, Math.PI*2); ctx.fill();
-    ctx.restore();
-    drawHealthBar(ctx, ex, ey, r, e.health, 30);
+    ctx.fillRect(W/2 - 140, H/2 - 50, 280, 100);
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px Inter, Arial';
+    ctx.fillText('Play Run Paused', W/2 - 54, H/2 - 18);
+    ctx.fillStyle = '#c4dfe7';
+    ctx.font = '13px Inter, Arial';
+    ctx.fillText('Spawn enemies with the panel or click canvas (20 points each)', W/2 - 180, H/2 + 4);
   }
-
-  // player with stronger glow and halo
-  drawGlowCircle(ctx, player.x, player.y, player.radius, '#3cb4df', '#dff8ff');
-  // player halo ring
-  ctx.save();
-  ctx.strokeStyle = 'rgba(60,180,220,0.14)';
-  ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.arc(player.x, player.y, player.radius+6, 0, Math.PI*2); ctx.stroke();
-  ctx.restore();
-  drawHealthBar(ctx, player.x, player.y, player.radius, player.health, player.maxHealth);
-
-  // particles
-  drawParticles(ctx);
-
-  // shop overlay (draw on top)
-  if (shopOpen && shopOverlayCache) {
-    ctx.save();
-    const w = 420, h = 120;
-    const cx = (canvas.width/DPR)/2, cy = (canvas.height/DPR)/2;
-    // dim
-    ctx.fillStyle = 'rgba(6,7,9,0.55)';
-    roundRect(ctx, cx - w/2 - 6, cy - h/2 - 6, w+12, h+12, 12);
-    ctx.fill();
-
-    // card
-    ctx.fillStyle = 'rgba(18,20,24,0.95)';
-    roundRect(ctx, cx - w/2, cy - h/2, w, h, 10);
-    ctx.fill();
-
-    // text
-    ctx.fillStyle = '#dbeefb'; ctx.font = '600 16px Inter, Arial';
-    ctx.fillText('Shop (AI deciding)...', cx - w/2 + 18, cy - h/2 + 28);
-
-    // show chosen option
-    const opt = shopOverlayCache.opt;
-    const idx = shopOverlayCache.idx || 0;
-    const ok = shopOverlayCache.ok;
-    ctx.font = '14px Inter, Arial';
-    ctx.fillStyle = ok ? '#b7ffde' : '#bdbdbd';
-    ctx.fillText(`${ok ? 'Purchased:' : 'Considered:'} ${opt.name}  (cost: ${opt.cost})`, cx - w/2 + 18, cy - h/2 + 60);
-    // progress/time left
-    const tleft = Math.max(0, shopTimeLeft || 0);
-    ctx.fillStyle = '#9fb6c6';
-    ctx.fillText(`Shop closes in ${tleft.toFixed(1)}s`, cx - w/2 + 18, cy - h/2 + 90);
-    ctx.restore();
-  }
-
-  // HUD (we reflect same info in HTML for accessibility)
-  updateHUD();
 }
 
-let shopOverlayCache = null;
-function updateHUD(){
-  hudEl.innerText = `Enemies: ${enemies.length}   Bullets: ${bullets.length}   Kills: ${player.kills}   Currency: ${player.currency}`;
-  // status line
-  statusEl.textContent = `Agent best fitness: ${Math.floor(agent.bestFitness)}  Sigma: ${agent.sigma.toFixed(3)}  Training: ${training}`;
+// update UI text elements
+function updateUI() {
+  document.getElementById('player-points').textContent = playerPoints;
+  aiStatsEl.innerText = `AI upgrades: ${JSON.stringify(agent.state.upgrades || {})}`;
 }
 
-// main loop & training chunking
-let accum = 0;
-function loop(now){
-  const dtReal = Math.min(0.04, (now - lastTime)/1000);
-  lastTime = now;
-  accum += dtReal;
+// main tick
+let last = performance.now();
+function tick(now) {
+  const dt = Math.min(1/30, (now - last) / 1000);
+  last = now;
 
-  // fixed-step at 60Hz for stable simulation
-  while (accum >= 1/60) {
-    // ambient spawns
-    if (Math.random() < 0.03) spawnAmbient();
-    stepSimulation(1/60);
-    episodeTime += 1/60;
-    accum -= 1/60;
+  if (mode === MODE_TRAIN) {
+    // visual: show occasional ambient & minimal simulation while trainer runs headless
+    spawnAmbient();
+    // basic local simulation step so canvas is alive
+    if (Math.random() < 0.5) {
+      // small step moves enemies slightly toward center for feedback
+      for (const e of enemies) {
+        e.update(dt, aiPlayer, bullets);
+      }
+    }
+  } else if (mode === MODE_PLAY) {
+    if (running) {
+      stepPlay(dt);
+    }
   }
 
   render();
-
-  // occasional background training (keeps UI responsive)
-  if (training && Math.random() < 0.02) {
-    // perform a short accelerated headless episode and try to update agent
-    const res = runHeadlessEpisode(14.0);
-    const {fitness, mutatedParams, savedParams} = res;
-    // try candidate
-    const oldParams = agent.getParams();
-    agent.setParams(mutatedParams);
-    const improved = agent.tryUpdateBest(fitness);
-    if (!improved) {
-      agent.setParams(savedParams);
-      agent.mutate();
-    } else {
-      // keep improved; apply to player state
-      player.applyState(agent.state);
-    }
-    statusEl.textContent = `Training: last fitness ${Math.floor(fitness)}  best ${Math.floor(agent.bestFitness)}`;
-  }
-
-  requestAnimationFrame(loop);
+  updateUI();
+  requestAnimationFrame(tick);
 }
-requestAnimationFrame(loop);
+requestAnimationFrame(tick);
 
-// Headless episode (like before) but slightly optimized for the browser without DOM updates
-function runHeadlessEpisode(maxTime=30){
-  const savedParams = agent.getParams();
-  const candidate = JSON.parse(JSON.stringify(savedParams));
-  // mutate candidate slightly
-  for (let i=0;i<candidate.W1.length;i++) for (let j=0;j<candidate.W1[i].length;j++) candidate.W1[i][j] += gauss()*candidate.sigma;
-  for (let i=0;i<candidate.b1.length;i++) candidate.b1[i] += gauss()*candidate.sigma;
-  for (let i=0;i<candidate.W2.length;i++) for (let j=0;j<candidate.W2[i].length;j++) candidate.W2[i][j] += gauss()*candidate.sigma;
-  for (let i=0;i<candidate.b2.length;i++) candidate.b2[i] += gauss()*candidate.sigma;
-
-  const p = new Player((canvas.width/DPR)/2, (canvas.height/DPR)/2, savedParams.state || {upgrades:{}});
+// utility: run a headless episode with candidate params and return fitness
+// (this duplicates earlier function but kept local for clarity)
+function runHeadlessEpisode(candidateParams, maxTime) {
+  const bounds = { w: canvas.width / DPR, h: canvas.height / DPR };
+  const p = new Player(bounds.w / 2, bounds.h / 2, candidateParams.state || { upgrades: {} });
   let bs = [], es = [];
   let t = 0, spawnTimer = 0;
-  const bounds = { w: canvas.width/DPR, h: canvas.height/DPR };
+  candidateParams.state = candidateParams.state || { upgrades: {}, gold: candidateParams.state?.gold || 0 };
+
   while (t < maxTime && p.alive) {
-    const dt = 1/60; t += dt;
+    const dt = 1 / 60; t += dt;
     spawnTimer -= dt;
     if (spawnTimer <= 0) {
-      spawnTimer = Math.max(0.25, 1.6 - t * 0.012);
-      const cnt = randInt(1,2);
-      for (let k=0;k<cnt;k++){
-        const side = randInt(0,3);
-        let x,y;
-        if (side===0){ x = -30; y = Math.random()*(canvas.height/DPR); }
-        else if (side===1){ x = (canvas.width/DPR)+30; y = Math.random()*(canvas.height/DPR); }
-        else if (side===2){ x = Math.random()*(canvas.width/DPR); y = -30; }
-        else { x = Math.random()*(canvas.width/DPR); y = (canvas.height/DPR)+30; }
-        es.push(new Enemy(x, y, ['melee','ranged','fast'][randInt(0,2)]));
+      spawnTimer = Math.max(0.25, 1.2 - t * 0.01);
+      const cnt = (Math.random() < 0.5) ? 1 : 2;
+      for (let k = 0; k < cnt; k++) {
+        const side = Math.floor(Math.random() * 4);
+        let x, y;
+        if (side === 0) { x = -30; y = Math.random() * bounds.h; }
+        else if (side === 1) { x = bounds.w + 30; y = Math.random() * bounds.h; }
+        else if (side === 2) { x = Math.random() * bounds.w; y = -30; }
+        else { x = Math.random() * bounds.w; y = bounds.h + 30; }
+        es.push(new Enemy(x, y, (Math.random() < 0.45) ? 'melee' : (Math.random() < 0.8 ? 'ranged' : 'fast')));
       }
     }
-    // agent forward with candidate
+
+    // agent decide with candidate params
     const inputs = collectInputs(p, es);
-    const inputArr = new Float32Array(14); for (let i=0;i<14;i++) inputArr[i] = inputs[i] || 0;
-    const out = forwardWithParams(candidate, inputArr);
-    let mx = Math.tanh(out[0]||0), my = Math.tanh(out[1]||0);
-    const l = Math.hypot(mx,my); if (l > 1e-6){ mx/=l; my/=l; }
-    p.x += mx * p.moveSpeed * dt; p.y += my * p.moveSpeed * dt;
+    const out = forwardWithParams(candidateParams, new Float32Array(inputs));
+    const mx = Math.tanh(out[0] || 0);
+    const my = Math.tanh(out[1] || 0);
+    const norm = Math.hypot(mx, my);
+    const nx = norm > 1e-6 ? mx / norm : 0;
+    const ny = norm > 1e-6 ? my / norm : 0;
+    p.x += nx * p.moveSpeed * dt;
+    p.y += ny * p.moveSpeed * dt;
     p.x = clamp(p.x, 0, bounds.w); p.y = clamp(p.y, 0, bounds.h);
+
     p.fireTimer = Math.max(0, p.fireTimer - dt);
-    const shootProb = 1/(1+Math.exp(-(out[2]||0)));
-    if (shootProb > 0.55 && p.fireTimer <= 1e-6){
-      if (es.length){
-        const en = es.reduce((a,b)=> ((a.x-p.x)**2+(a.y-p.y)**2) < ((b.x-p.x)**2+(b.y-p.y)**2) ? a : b);
-        const dx = en.x-p.x, dy = en.y-p.y, dd = Math.hypot(dx,dy)+1e-6;
-        bs.push(new Bullet(p.x + (dx/dd)*(p.radius+6), p.y + (dy/dd)*(p.radius+6), dx/dd, dy/dd, p, p.damage, 420));
-        p.fireTimer = p.fireCooldown;
-      }
+    const shootProb = 1 / (1 + Math.exp(-(out[2] || 0)));
+    if (shootProb > 0.55 && p.fireTimer <= 1e-6 && es.length) {
+      const en = nearest(p, es);
+      p.fireAt(en.x, en.y, bs, bounds);
     }
-    // bullets update simplified
-    for (let i = bs.length-1;i>=0;i--){
+
+    // bullets
+    for (let i = bs.length - 1; i >= 0; i--) {
       const b = bs[i]; b.update(dt, bounds);
-      if (!b.alive){ bs.splice(i,1); continue; }
-      if (b.owner === p){
-        for (let j = es.length-1; j>=0; j--){
+      if (!b.alive) { bs.splice(i, 1); continue; }
+      if (b.owner === p) {
+        for (let j = es.length - 1; j >= 0; j--) {
           const e = es[j];
-          if ((b.x - e.x)**2 + (b.y - e.y)**2 < (b.radius+e.radius)**2){
-            e.health -= b.damage; b.alive=false;
-            if (e.health <= 0 && e.alive){ e.alive=false; es.splice(j,1); p.kills++; p.currency+=15; }
+          if ((b.x - e.x) ** 2 + (b.y - e.y) ** 2 < (b.radius + e.radius) ** 2) {
+            e.health -= b.damage; b.pierce -= 1;
+            if (b.pierce <= 0) b.alive = false;
+            if (e.health <= 0 && e.alive) { e.alive = false; es.splice(j, 1); p.kills++; p.currency += 15; candidateParams.state.gold = (candidateParams.state.gold || 0) + 15; }
             break;
           }
         }
       }
     }
-    // enemies
-    for (let i = es.length-1; i>=0; i--){
+
+    for (let i = es.length - 1; i >= 0; i--) {
       const e = es[i]; e.update(dt, p, bs);
-      if ((e.x - p.x)**2 + (e.y - p.y)**2 < (e.radius + p.radius)**2){
-        if (e.attackTimer <= 1e-6){ p.health -= e.damage; e.attackTimer = e.attackCooldown; if (p.health <= 0) p.alive=false; }
+      if ((e.x - p.x) ** 2 + (e.y - p.y) ** 2 < (e.radius + p.radius) ** 2) {
+        if (e.attackTimer <= 1e-6) { p.health -= e.damage; e.attackTimer = e.attackCooldown; if (p.health <= 0) p.alive = false; }
       }
     }
+
+    // allow purchases
+    if ((candidateParams.state.gold || 0) >= Math.min(...SHOP_OPTIONS.map(o => o.cost))) {
+      performAgentShopPurchase(candidateParams, SHOP_OPTIONS);
+    }
+    // heal if necessary
+    if (p.health < p.maxHealth * 0.45 && ((candidateParams.state.upgrades && candidateParams.state.upgrades.heal) || p.healAvailable)) {
+      if (!p.useHeal()) {
+        if ((candidateParams.state.upgrades || {}).heal > 0) {
+          candidateParams.state.upgrades.heal -= 1; p.healAvailable += 1; p.useHeal();
+        }
+      }
+    }
+
     p.update(dt);
   }
 
-  const fitness = p.kills * 50.0 + t*1.0 + p.currency*2.0 - (p.maxHealth - p.health)*0.5;
-  return { fitness, mutatedParams: candidate, savedParams };
+  const fitness = p.kills * 50.0 + t * 1.0 + p.currency * 2.0 - (p.maxHealth - p.health) * 0.5;
+  return { fitness, kills: p.kills, time: t };
 }
 
-// helpers for running forward using param JSON
-function forwardWithParams(params, x){
-  // W1: array of arrays, b1: array, W2: array of arrays, b2: array
-  const hidden = new Float32Array(params.W1.length);
-  for (let i=0;i<params.W1.length;i++){
-    let s = params.b1[i] || 0;
-    for (let j=0;j<params.W1[i].length;j++) s += params.W1[i][j] * x[j];
+// helpers reused by headless functions
+function forwardWithParams(params, xarr) {
+  const W1 = params.W1, b1 = params.b1, W2 = params.W2, b2 = params.b2;
+  const hidden = new Float32Array(W1.length);
+  for (let i = 0; i < W1.length; i++) {
+    let s = b1[i] || 0;
+    for (let j = 0; j < W1[i].length; j++) s += W1[i][j] * xarr[j];
     hidden[i] = Math.tanh(s);
   }
-  const out = new Float32Array(params.W2.length);
-  for (let i=0;i<params.W2.length;i++){
-    let s = params.b2[i] || 0;
-    for (let j=0;j<params.W2[i].length;j++) s += params.W2[i][j] * hidden[j];
+  const out = new Float32Array(W2.length);
+  for (let i = 0; i < W2.length; i++) {
+    let s = b2[i] || 0;
+    for (let j = 0; j < W2[i].length; j++) s += W2[i][j] * hidden[j];
     out[i] = s;
   }
   return out;
 }
+
+// helper functions
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function nearest(p, arr) { if (arr.length === 0) return { x: p.x + 1, y: p.y }; return arr.reduce((a, b) => ((a.x - p.x) ** 2 + (a.y - p.y) ** 2) < ((b.x - p.x) ** 2 + (b.y - p.y) ** 2) ? a : b); }
+function collectInputs(player, enemies) {
+  const inputs = [];
+  inputs.push(player.health / Math.max(1, player.maxHealth));
+  inputs.push(player.currency / 200.0);
+  const sorted = enemies.slice().sort((a, b) => ((a.x - player.x) ** 2 + (a.y - player.y) ** 2) - ((b.x - player.x) ** 2 + (b.y - player.y) ** 2));
+  for (let i = 0; i < 3; i++) {
+    if (i < sorted.length) {
+      const e = sorted[i];
+      inputs.push((e.x - player.x) / (canvas.width / DPR));
+      inputs.push((e.y - player.y) / (canvas.height / DPR));
+      const d = Math.hypot((e.x - player.x) / (canvas.width / DPR), (e.y - player.y) / (canvas.height / DPR));
+      inputs.push(d);
+      let kind_code = 0;
+      if (e.kind === 'melee') kind_code = 0.0;
+      else if (e.kind === 'ranged') kind_code = 0.5;
+      else if (e.kind === 'fast') kind_code = 1.0;
+      inputs.push(kind_code);
+    } else {
+      inputs.push(0, 0, 0, 0);
+    }
+  }
+  while (inputs.length < INPUT_SIZE) inputs.push(0);
+  return inputs.slice(0, INPUT_SIZE);
+}
+
+function gauss() { let u=0,v=0; while(u===0)u=Math.random(); while(v===0)v=Math.random(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+
+// update visible AI stats in side panel
+function updateAIStats() {
+  const s = agent.state || {};
+  aiStatsEl.innerText = `Upgrades: ${JSON.stringify(s.upgrades || {})}\nGold: ${s.gold || 0}`;
+}
+
+// kick off initial mode
+switchMode(MODE_TRAIN);
+updateUI();
+requestAnimationFrame(tick);
