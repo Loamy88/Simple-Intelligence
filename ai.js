@@ -1,25 +1,25 @@
-// ai.js - simple one-hidden-layer neural agent with evolution & persistence
+// ai.js - neural agent with persistent weights, shop & upgrades, and simple hill-climb evolution.
+// Persisted to localStorage as "saved_agent_v2".
 export class NeuralAgent {
   constructor(opts = {}) {
     this.inputSize = opts.inputSize || 14;
-    this.hiddenSize = opts.hiddenSize || 32;
+    this.hiddenSize = opts.hiddenSize || 48;
     this.outputSize = opts.outputSize || 5;
     this.sigma = opts.sigma || 0.12;
 
-    // initialize weights
     this.W1 = randMatrix(this.hiddenSize, this.inputSize, 0.5);
     this.b1 = new Float32Array(this.hiddenSize);
     this.W2 = randMatrix(this.outputSize, this.hiddenSize, 0.5);
     this.b2 = new Float32Array(this.outputSize);
 
     this.bestFitness = -1e9;
-    this.state = { upgrades: {} };
+    // persistent upgrades & state persisted between runs
+    this.state = { upgrades: {}, gold: 0 };
 
     this.loadIfExists();
   }
 
   forward(x) {
-    // x: Float32Array length inputSize
     const h = new Float32Array(this.hiddenSize);
     for (let i = 0; i < this.hiddenSize; i++) {
       let s = this.b1[i];
@@ -38,7 +38,7 @@ export class NeuralAgent {
   }
 
   decide(inputs) {
-    // inputs: JS array
+    // inputs -> forward -> interpret
     const x = new Float32Array(this.inputSize);
     for (let i = 0; i < this.inputSize; i++) x[i] = inputs[i] || 0;
     const out = this.forward(x);
@@ -46,10 +46,11 @@ export class NeuralAgent {
     const moveY = Math.tanh(out[1] || 0);
     const shoot = 1 / (1 + Math.exp(-(out[2] || 0)));
     const shopVal = out[3] || 0;
-    return { move: [moveX, moveY], shootProb: shoot, shopValue: shopVal };
+    const special = out[4] || 0;
+    return { move: [moveX, moveY], shootProb: shoot, shopValue: shopVal, special: special };
   }
 
-  mutate(scale = undefined) {
+  mutate(scale) {
     const s = (scale !== undefined) ? scale : this.sigma;
     perturbMatrix(this.W1, s);
     perturbArray(this.b1, s);
@@ -91,27 +92,62 @@ export class NeuralAgent {
     }
   }
 
+  // AI shop: buys as much as possible based on state.gold
+  // options is an array of shop options {name,key,amount,cost,repeatable(boolean)}
+  shopBuyLoop(options) {
+    const up = this.state.upgrades || {};
+    let bought = [];
+    // greedy: while gold and there exists affordable option, pick best value/cost heuristic
+    let changed = true;
+    while (changed) {
+      changed = false;
+      // filter affordable
+      const affordable = options.filter(o => (this.state.gold >= o.cost));
+      if (affordable.length === 0) break;
+      // choose best by simple heuristic: (o.valuePerCost) -> here prefer damage & multishot slightly more
+      affordable.sort((a,b) => {
+        const va = (a.value || 1) / a.cost * ((a.priority||1));
+        const vb = (b.value || 1) / b.cost * ((b.priority||1));
+        return vb - va;
+      });
+      const pick = affordable[0];
+      // apply
+      this.state.gold -= pick.cost;
+      up[pick.key] = (up[pick.key] || 0) + (pick.amount || 1);
+      bought.push(pick.name);
+      changed = true;
+      if (!pick.repeatable) {
+        // remove non-repeatable by marking cost huge
+        pick.cost = 1e9;
+      }
+    }
+    this.state.upgrades = up;
+    return bought;
+  }
+
   save() {
-    const obj = this.getParams();
-    localStorage.setItem("saved_agent", JSON.stringify(obj));
-    // also create an export blob if user wants to download
+    try {
+      const obj = this.getParams();
+      localStorage.setItem("saved_agent_v2", JSON.stringify(obj));
+    } catch (e) {
+      console.warn("Save failed", e);
+    }
   }
 
   loadIfExists() {
-    const raw = localStorage.getItem("saved_agent");
-    if (!raw) return;
     try {
+      const raw = localStorage.getItem("saved_agent_v2");
+      if (!raw) return;
       const p = JSON.parse(raw);
       this.setParams(p);
-      console.log("Loaded agent from localStorage bestFitness=", this.bestFitness);
+      console.log("Loaded agent; bestFitness=", this.bestFitness);
     } catch (e) {
-      console.warn("Failed to parse saved agent:", e);
+      console.warn("Load failed", e);
     }
   }
 
   exportJSON() {
-    const dataStr = JSON.stringify(this.getParams());
-    return dataStr;
+    return JSON.stringify(this.getParams());
   }
 
   importJSON(jsonStr) {
@@ -122,11 +158,11 @@ export class NeuralAgent {
 }
 
 // utilities
-function randMatrix(rows, cols, scale = 0.5) {
+function randMatrix(rows, cols, scale) {
   const out = [];
   for (let i = 0; i < rows; i++) {
     const r = new Float32Array(cols);
-    for (let j = 0; j < cols; j++) r[j] = gaussian() * scale;
+    for (let j = 0; j < cols; j++) r[j] = gaussian() * (scale || 0.5);
     out.push(r);
   }
   return out;
@@ -140,16 +176,9 @@ function perturbMatrix(mat, s) {
 function perturbArray(arr, s) {
   for (let i = 0; i < arr.length; i++) arr[i] += gaussian() * s;
 }
-function matrixToArray(mat) {
-  return mat.map(r => Array.from(r));
-}
-function arrayToMatrix(arr) {
-  return arr.map(r => Float32Array.from(r));
-}
-// simple gaussian random (Box-Muller)
+function matrixToArray(mat) { return mat.map(r => Array.from(r)); }
+function arrayToMatrix(arr) { return arr.map(r => Float32Array.from(r)); }
 function gaussian() {
-  let u = 0, v = 0;
-  while (u === 0) u = Math.random();
-  while (v === 0) v = Math.random();
-  return Math.sqrt(-2.0 * Math.log(u)) * Math.cos(2.0 * Math.PI * v);
+  let u=0,v=0; while(u===0)u=Math.random(); while(v===0)v=Math.random();
+  return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);
 }
