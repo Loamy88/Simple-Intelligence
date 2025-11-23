@@ -1,4 +1,4 @@
-// main.js - consolidated single copy with gauss defined before usage
+// main.js - consolidated single copy; adds AI-death popup + automatic restart
 import { NeuralAgent } from './ai.js';
 import { Player, Enemy, Bullet } from './entities.js';
 
@@ -7,7 +7,13 @@ const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
 const trainStatsEl = document.getElementById('train-stats');
 const aiStatsEl = document.getElementById('ai-stats');
-const playerPointsEl = document.getElementById('player-points');
+
+const deathModal = document.getElementById('death-modal');
+const deathTitle = document.getElementById('death-title');
+const deathBody = document.getElementById('death-body');
+const restartNowBtn = document.getElementById('restart-now');
+const dismissBtn = document.getElementById('dismiss-modal');
+const autoRestartCountEl = document.getElementById('auto-restart-count');
 
 let DPR = Math.max(1, window.devicePixelRatio || 1);
 function resizeCanvas() {
@@ -21,9 +27,12 @@ canvas.style.height = '480px';
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
 
-// helper functions (placed early so they're available everywhere)
+// helpers
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function nearest(p, arr) { if (!arr || arr.length === 0) return { x: p.x + 1, y: p.y }; return arr.reduce((a, b) => ((a.x - p.x) ** 2 + (a.y - p.y) ** 2) < ((b.x - p.x) ** 2 + (b.y - p.y) ** 2) ? a : b); }
+function gauss() { let u = 0, v = 0; while (u === 0) u = Math.random(); while (v === 0) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+// input collection for agent (fixed size 14)
 function collectInputs(player, enemies) {
   const INPUT_SIZE = 14;
   const inputs = [];
@@ -49,9 +58,6 @@ function collectInputs(player, enemies) {
   while (inputs.length < INPUT_SIZE) inputs.push(0);
   return inputs.slice(0, INPUT_SIZE);
 }
-
-// gaussian helper (defined early so training can call it without ReferenceError)
-function gauss() { let u = 0, v = 0; while (u === 0) u = Math.random(); while (v === 0) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
 
 // Mode constants
 const MODE_TRAIN = 'train';
@@ -80,7 +86,7 @@ const SHOP_OPTIONS = [
   { name: "Heal Charge +1", key: "heal", amount: 1, cost: 50, value: 1, repeatable: true, priority: 1.0 }
 ];
 
-// UI wiring
+// UI elements wiring
 document.getElementById('mode-train').addEventListener('click', () => switchMode(MODE_TRAIN));
 document.getElementById('mode-play').addEventListener('click', () => switchMode(MODE_PLAY));
 
@@ -142,6 +148,21 @@ canvas.addEventListener('click', (e) => {
 
 let mouse = { x: canvas.width / DPR / 2, y: canvas.height / DPR / 2 };
 
+// Modal controls & restart logic
+let modalVisible = false;
+let autoRestartTimer = null;
+let autoRestartSeconds = 3;
+
+restartNowBtn.addEventListener('click', () => {
+  hideDeathModal();
+  restartPlayRun();
+});
+dismissBtn.addEventListener('click', () => {
+  hideDeathModal();
+  // leave the run paused; user can decide next steps
+});
+
+// switch mode function
 function switchMode(m) {
   mode = m;
   document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
@@ -163,6 +184,7 @@ function switchMode(m) {
   }
 }
 
+// training toggles & trainer loop
 function toggleTraining() {
   trainerRunning = !trainerRunning;
   document.getElementById('toggle-training').textContent = trainerRunning ? 'Stop Auto-Training' : 'Start Auto-Training';
@@ -203,10 +225,9 @@ async function startHeadlessTrainer() {
     await new Promise(r => setTimeout(r, 12));
   }
 }
-
 function stopHeadlessTrainer() { trainerRunning = false; }
 
-// Single consolidated runHeadlessEpisode
+// runHeadlessEpisode (single copy)
 function runHeadlessEpisode(candidateParams, maxTime = 20) {
   const bounds = { w: canvas.width / DPR, h: canvas.height / DPR };
   const p = new Player(bounds.w / 2, bounds.h / 2, candidateParams.state || { upgrades: {} });
@@ -373,22 +394,76 @@ function stepPlay(dt) {
     }
   }
 
+  // AI buys upgrades automatically during run
   if ((agent.state.gold || 0) >= Math.min(...SHOP_OPTIONS.map(o => o.cost))) {
     const bought = agent.shopBuyLoop(JSON.parse(JSON.stringify(SHOP_OPTIONS)));
     if (bought.length > 0) { aiPlayer.applyState(agent.state); agent.save(); }
   }
   if (aiPlayer.health < aiPlayer.maxHealth * 0.45) aiPlayer.useHeal();
   aiPlayer.update(dt);
+
+  // if AI died during this step, trigger modal and restart flow (only in play mode)
+  if (!aiPlayer.alive && mode === MODE_PLAY && !modalVisible) {
+    showDeathModal({ kills: aiPlayer.kills, gold: agent.state.gold || 0, time: Math.round(performance.now()) });
+  }
 }
 
-function resetPlayRun() {
+// reset play run (preserve agent.state upgrades)
+function restartPlayRun() {
   aiPlayer = new Player((canvas.width / DPR) / 2, (canvas.height / DPR) / 2, agent.state);
-  bullets = []; enemies = []; running = false; playerPoints = 100;
+  bullets = []; enemies = []; running = false;
   document.getElementById('start-run').disabled = false;
   document.getElementById('pause-run').disabled = true;
+  playerPoints = 100;
   updateUI();
 }
 
+// direct reset without modal
+function resetPlayRun() {
+  restartPlayRun();
+  hideDeathModal();
+}
+
+// show/hide modal and auto-restart
+function showDeathModal(stats) {
+  modalVisible = true;
+  deathTitle.textContent = "AI Died";
+  deathBody.innerHTML = `AI died. Kills: ${stats.kills}  Gold: ${stats.gold}`;
+  deathModal.classList.remove('hidden');
+  autoRestartSeconds = 3;
+  autoRestartCountEl.textContent = `Auto-restart in ${autoRestartSeconds}s`;
+  // stop run
+  running = false;
+  // set countdown
+  if (autoRestartTimer) clearInterval(autoRestartTimer);
+  autoRestartTimer = setInterval(() => {
+    autoRestartSeconds--;
+    if (autoRestartSeconds <= 0) {
+      clearInterval(autoRestartTimer);
+      autoRestartTimer = null;
+      hideDeathModal();
+      restartPlayRun();
+    } else {
+      autoRestartCountEl.textContent = `Auto-restart in ${autoRestartSeconds}s`;
+    }
+  }, 1000);
+}
+
+function hideDeathModal() {
+  modalVisible = false;
+  deathModal.classList.add('hidden');
+  if (autoRestartTimer) { clearInterval(autoRestartTimer); autoRestartTimer = null; }
+  autoRestartCountEl.textContent = '';
+}
+
+// UI updates
+function updateUI() {
+  const aiUp = agent.state && agent.state.upgrades ? agent.state.upgrades : {};
+  document.getElementById('player-points').textContent = playerPoints;
+  aiStatsEl.innerText = `Upgrades: ${JSON.stringify(aiUp)}\nGold: ${agent.state.gold || 0}`;
+}
+
+// rendering
 function spawnAmbient() {
   if (Math.random() < 0.02 && enemies.length < 18) {
     const side = Math.floor(Math.random() * 4);
@@ -428,13 +503,6 @@ function render() {
   }
 }
 
-function updateUI() {
-  const aiUp = agent.state && agent.state.upgrades ? agent.state.upgrades : {};
-  document.getElementById('player-points').textContent = playerPoints;
-  aiStatsEl.innerText = `Upgrades: ${JSON.stringify(aiUp)}\nGold: ${agent.state.gold || 0}`;
-}
-
-// main tick
 let last = performance.now();
 function tick(now) {
   const dt = Math.min(1/30, (now - last) / 1000);
@@ -453,9 +521,9 @@ function tick(now) {
 }
 requestAnimationFrame(tick);
 
-// expose for debugging if needed
-window._RGINTERNAL = { agent, runHeadlessEpisode };
-
 // initialize
 switchMode(MODE_TRAIN);
 updateUI();
+
+// expose for debugging
+window._RGINTERNAL = { agent, runHeadlessEpisode };
