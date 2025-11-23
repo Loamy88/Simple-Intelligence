@@ -4,8 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Roguelite — Auto-Train & Play vs AI</title>
-  <!-- Make sure this filename matches exactly (case-sensitive) the CSS file in your repo -->
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="style.css" />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 </head>
 <body>
@@ -74,7 +73,19 @@
     </footer>
   </div>
 
-  <!-- single script import. Ensure you do not include main.js twice. -->
+  <!-- Death popup modal -->
+  <div id="death-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div class="modal-card">
+      <h2 id="death-title">AI Died</h2>
+      <div id="death-body">The AI has been killed.</div>
+      <div class="modal-actions">
+        <button id="restart-now">Restart Now</button>
+        <button id="dismiss-modal">Dismiss</button>
+      </div>
+      <div class="small muted" id="auto-restart-count">Auto-restart in 3s</div>
+    </div>
+  </div>
+
   <script type="module" src="main.js"></script>
 </body>
 </html>
