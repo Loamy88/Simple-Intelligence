@@ -3,31 +3,83 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Roguelite — You Spawn Enemies, AI Controls Player</title>
+  <title>Roguelite — Auto-Train & Play vs AI</title>
   <link rel="stylesheet" href="style.css" />
-  <!-- Use a clean system+Google font fallback; Google Fonts optional -->
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 </head>
 <body>
-  <div id="ui">
-    <div id="topbar">
-      <div class="title">Roguelite — You Spawn Enemies, AI Controls Player</div>
+  <div id="container">
+    <header>
+      <div class="title">Roguelite — You spawn enemies, AI controls the player</div>
       <div class="controls">
-        <button id="btn-save">Save AI</button>
-        <button id="btn-load">Load AI</button>
-        <button id="btn-export">Export AI</button>
-        <input id="file-import" type="file" accept=".json" style="display:none" />
-        <button id="btn-toggle-train">Toggle Training</button>
-        <span id="status">Status: ready</span>
+        <button id="mode-train" class="mode-btn active">Auto Train</button>
+        <button id="mode-play" class="mode-btn">Play vs AI</button>
       </div>
-    </div>
+    </header>
 
-    <canvas id="game" width="960" height="640"></canvas>
+    <main>
+      <canvas id="game" width="960" height="640"></canvas>
 
-    <div id="bottombar">
-      <div id="hud"></div>
-      <div id="help">Controls: 1=melee 2=ranged 3=fast (spawn at mouse). T toggles training. S-save, L-load.</div>
-    </div>
+      <aside id="panel">
+        <div class="panel-section">
+          <div class="panel-title">Status</div>
+          <div id="status">Idle</div>
+        </div>
+
+        <div class="panel-section" id="training-controls">
+          <div class="panel-title">Training</div>
+          <button id="toggle-training">Start Auto-Training</button>
+          <div class="small">Auto-training runs fast headless episodes and updates saved weights to localStorage.</div>
+          <div id="train-stats" class="small muted"></div>
+        </div>
+
+        <div class="panel-section" id="play-controls" style="display:none">
+          <div class="panel-title">Play Mode</div>
+          <div>Points to spend: <span id="player-points">100</span></div>
+          <div class="row">
+            <button data-spawn="melee" class="spawn-btn">Spawn Melee (20)</button>
+            <button data-spawn="ranged" class="spawn-btn">Spawn Ranged (30)</button>
+            <button data-spawn="fast" class="spawn-btn">Spawn Fast (25)</button>
+          </div>
+          <div class="row">
+            <button id="start-run">Start Run</button>
+            <button id="pause-run" disabled>Pause</button>
+            <button id="reset-run">Reset</button>
+          </div>
+          <div class="small muted">Game is paused until you press Start. The AI uses saved weights from training.</div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-title">AI Shop & Saves</div>
+          <div class="small">AI gold (from kills) is used by the AI to buy upgrades during runs automatically. Upgrades persist between runs.</div>
+          <div class="row">
+            <button id="save-ai">Save AI</button>
+            <button id="load-ai">Load AI</button>
+            <button id="export-ai">Export AI</button>
+            <input id="import-file" type="file" accept=".json" style="display:none" />
+            <button id="import-ai">Import AI</button>
+          </div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-title">AI Stats</div>
+          <div id="ai-stats" class="small muted"></div>
+        </div>
+
+        <div class="panel-section">
+          <div class="panel-title">Tips</div>
+          <div class="small muted">
+            - Train (Auto Train) to improve AI quickly. It saves the best weights to localStorage.<br>
+            - Switch to "Play vs AI" to use saved weights. The run is paused so you can spawn enemies with points.<br>
+            - AI can buy weapons, multi-shot, speed, max health, and heal. In training the AI chooses and buys automatically.
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <footer>
+      <div class="muted">Works on GitHub Pages — push these files to a repo and enable Pages (root or docs/).</div>
+    </footer>
   </div>
 
   <script type="module" src="main.js"></script>
