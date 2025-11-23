@@ -1,36 +1,43 @@
 ```markdown
-# Roguelite — Auto-Training & Play vs AI (Browser)
+Instructions to persist AI weights into your GitHub repository (secure approach)
 
-This repository contains a single-page browser game that supports two modes:
+Summary
+- The client (browser) will POST exported weights JSON to a small serverless function.
+- The serverless function (example below for Netlify) uses a GitHub token stored as an environment variable to commit the file into your repository.
+- This avoids embedding tokens in client code and is the recommended secure method.
 
-- Auto Train: runs many short headless episodes (accelerated) to evolve a small neural network (hill-climb mutation). The best weights are saved to localStorage ("saved_agent_v2") and can be exported/imported as JSON.
-- Play vs AI: loads saved weights and runs a paused run where the human spawns enemies with points and then starts the run. The AI uses its saved weights and can buy upgrades with gold earned from kills. AI purchases persist between runs.
+Steps
+1. Deploy the serverless function:
+   - Create a new Netlify site (or use an existing one).
+   - Create a directory `netlify/functions` and add `save-ai.js` (above) or add via Netlify CLI.
+   - Set environment variables for the site:
+     - GITHUB_TOKEN : a personal access token (repo scope). Create one at https://github.com/settings/tokens (classic token with repo permissions) or set up a GitHub App.
+     - REPO_OWNER : Loamy88
+     - REPO_NAME : Simple-Intelligence
+     - BRANCH : main (or your target branch)
+     - TARGET_PATH (optional) : ai_weights.json
+   - Deploy the Netlify site. After deploy, the function endpoint will be:
+       https://<your-netlify-site>.netlify.app/.netlify/functions/save-ai
 
-How it works (summary)
-- Neural network: one hidden layer (configurable). Decision outputs movement, shoot probability, and a shop value.
-- Training: repeatedly mutates a copy of the network and simulates a short headless episode (no rendering). If fitness improves, the mutated weights replace the best weights and are persisted. The shop is simulated: the AI collects gold and buys upgrades greedily.
-- Play: loads saved weights; the run is paused until Start. The player spends points to spawn enemies (click canvas or use spawn buttons). AI purchases happen automatically during the run and upgrades apply immediately.
+2. Update client (main.js):
+   - Set SAVE_ENDPOINT to the URL above.
+   - When you click "Save AI" the client will call the function and the function will create/update `ai_weights.json` in the repository.
 
-Files
-- index.html — page & UI
-- style.css — styling
-- ai.js — neural agent, persistence, shop logic
-- entities.js — player/enemy/bullet entities (weapons, multishot, pierce, heal)
-- main.js — the main glue: auto-trainer, play mode, UI, and rendering
+3. Loading weights:
+   - The client can fetch the raw file:
+       https://raw.githubusercontent.com/Loamy88/Simple-Intelligence/main/ai_weights.json
+     (works for public repo). The provided main.js has a function loadWeightsFromRepo() that uses that URL.
 
-Run locally
-- Serve with a static server (recommended):
-  - python -m http.server 8000
-  - open http://localhost:8000
+Security notes
+- Do NOT put the GitHub token in client-side code.
+- Use Netlify/Vercel/your serverless host to keep the token secret.
+- For production, consider adding authentication on the serverless endpoint so not everyone can overwrite your repo (e.g., add an API key you set as another Netlify env var and the client includes it in the request headers).
 
-Deploy to GitHub Pages
-- Push these files to a repository (root or docs/).
-- Enable GitHub Pages in repository settings (select the branch & folder used).
-- Open the published URL.
+Alternative options
+- Use a GitHub Action to commit the file: have client POST to a small backend (or use repository_dispatch via server) which triggers a workflow that writes the file.
+- Use a dedicated backend server if you have one.
 
-Notes & Next Steps
-- This is a prototype. Training runs in the main thread and is intentionally lightweight; moving training to a Web Worker will avoid any UI hiccups if you train heavily.
-- If you want faster training or more advanced neuroevolution/gradient-based learning, I can add a basic population-based neuroevolution or integrate a WASM-backed RL library.
-- I can also add better enemy spawn controls (spawn at mouse), sound, and sprite art.
-
-Enjoy! If you hit any runtime errors in the browser console, paste the error here and I'll patch it quickly.
+If you want, I can:
+- produce a GitHub Action workflow that writes a file given a dispatch payload (requires a small server to call it with a secret),
+- adapt the serverless function for Vercel or Cloudflare Workers.
+```
