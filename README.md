@@ -1,30 +1,36 @@
 ```markdown
-# Roguelite (Browser) — You Spawn Enemies, AI Controls Player
+# Roguelite — Auto-Training & Play vs AI (Browser)
 
-This is a browser port of the earlier Python/pygame prototype so it can be hosted on GitHub Pages.
+This repository contains a single-page browser game that supports two modes:
 
-Features
-- Top-down roguelite: you (the user) spawn enemies (keys 1/2/3 at mouse).
-- The AI controls the player using a small neural network (one hidden layer).
-- The AI persists weights to localStorage; you can export/import JSON too.
-- Basic hill-climb evolution: training toggles background headless episodes that mutate weights and keep improvements.
-- Periodic shop where the AI buys upgrades with in-run currency.
+- Auto Train: runs many short headless episodes (accelerated) to evolve a small neural network (hill-climb mutation). The best weights are saved to localStorage ("saved_agent_v2") and can be exported/imported as JSON.
+- Play vs AI: loads saved weights and runs a paused run where the human spawns enemies with points and then starts the run. The AI uses its saved weights and can buy upgrades with gold earned from kills. AI purchases persist between runs.
 
-How to run locally
-- Open index.html in a browser (Chrome/Firefox recommended).
-- Or run a simple static server:
-  - Python 3: python -m http.server 8000
-  - Then open http://localhost:8000
+How it works (summary)
+- Neural network: one hidden layer (configurable). Decision outputs movement, shoot probability, and a shop value.
+- Training: repeatedly mutates a copy of the network and simulates a short headless episode (no rendering). If fitness improves, the mutated weights replace the best weights and are persisted. The shop is simulated: the AI collects gold and buys upgrades greedily.
+- Play: loads saved weights; the run is paused until Start. The player spends points to spawn enemies (click canvas or use spawn buttons). AI purchases happen automatically during the run and upgrades apply immediately.
+
+Files
+- index.html — page & UI
+- style.css — styling
+- ai.js — neural agent, persistence, shop logic
+- entities.js — player/enemy/bullet entities (weapons, multishot, pierce, heal)
+- main.js — the main glue: auto-trainer, play mode, UI, and rendering
+
+Run locally
+- Serve with a static server (recommended):
+  - python -m http.server 8000
+  - open http://localhost:8000
 
 Deploy to GitHub Pages
-1. Create a new GitHub repository (or use an existing one).
-2. Add these files to the repository in the root (index.html, style.css, main.js, ai.js, entities.js).
-3. Commit and push.
-4. In the repository settings -> Pages, set the source to the main branch / root (or the docs folder if you prefer).
-5. Save — GitHub Pages will provide a URL where the site is hosted (usually https://<your-username>.github.io/<repo>/).
-6. Open that URL in your browser. LocalStorage is used to persist the AI between visits.
+- Push these files to a repository (root or docs/).
+- Enable GitHub Pages in repository settings (select the branch & folder used).
+- Open the published URL.
 
-Notes & next steps
-- The NN is intentionally small and uses a simple mutation strategy. If you want stronger learning, I can add a population-based NEAT or integrate a WebAssembly ML backend.
-- I can also add a nicer UI for the shop, progress visualization of weights, or a "replay" export.
-```
+Notes & Next Steps
+- This is a prototype. Training runs in the main thread and is intentionally lightweight; moving training to a Web Worker will avoid any UI hiccups if you train heavily.
+- If you want faster training or more advanced neuroevolution/gradient-based learning, I can add a basic population-based neuroevolution or integrate a WASM-backed RL library.
+- I can also add better enemy spawn controls (spawn at mouse), sound, and sprite art.
+
+Enjoy! If you hit any runtime errors in the browser console, paste the error here and I'll patch it quickly.
