@@ -1,4 +1,4 @@
-// main.js - consolidated single copy (ensure this file is included only once)
+// main.js - consolidated single copy with gauss defined before usage
 import { NeuralAgent } from './ai.js';
 import { Player, Enemy, Bullet } from './entities.js';
 
@@ -20,6 +20,38 @@ canvas.style.width = '720px';
 canvas.style.height = '480px';
 resizeCanvas();
 window.addEventListener('resize', resizeCanvas);
+
+// helper functions (placed early so they're available everywhere)
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function nearest(p, arr) { if (!arr || arr.length === 0) return { x: p.x + 1, y: p.y }; return arr.reduce((a, b) => ((a.x - p.x) ** 2 + (a.y - p.y) ** 2) < ((b.x - p.x) ** 2 + (b.y - p.y) ** 2) ? a : b); }
+function collectInputs(player, enemies) {
+  const INPUT_SIZE = 14;
+  const inputs = [];
+  inputs.push(player.health / Math.max(1, player.maxHealth));
+  inputs.push(player.currency / 200.0);
+  const sorted = enemies.slice().sort((a, b) => ((a.x - player.x) ** 2 + (a.y - player.y) ** 2) - ((b.x - player.x) ** 2 + (b.y - player.y) ** 2));
+  for (let i = 0; i < 3; i++) {
+    if (i < sorted.length) {
+      const e = sorted[i];
+      inputs.push((e.x - player.x) / (canvas.width / DPR));
+      inputs.push((e.y - player.y) / (canvas.height / DPR));
+      const d = Math.hypot((e.x - player.x) / (canvas.width / DPR), (e.y - player.y) / (canvas.height / DPR));
+      inputs.push(d);
+      let kind_code = 0;
+      if (e.kind === 'melee') kind_code = 0.0;
+      else if (e.kind === 'ranged') kind_code = 0.5;
+      else if (e.kind === 'fast') kind_code = 1.0;
+      inputs.push(kind_code);
+    } else {
+      inputs.push(0, 0, 0, 0);
+    }
+  }
+  while (inputs.length < INPUT_SIZE) inputs.push(0);
+  return inputs.slice(0, INPUT_SIZE);
+}
+
+// gaussian helper (defined early so training can call it without ReferenceError)
+function gauss() { let u = 0, v = 0; while (u === 0) u = Math.random(); while (v === 0) v = Math.random(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
 
 // Mode constants
 const MODE_TRAIN = 'train';
@@ -48,7 +80,7 @@ const SHOP_OPTIONS = [
   { name: "Heal Charge +1", key: "heal", amount: 1, cost: 50, value: 1, repeatable: true, priority: 1.0 }
 ];
 
-// UI wiring (same as earlier)
+// UI wiring
 document.getElementById('mode-train').addEventListener('click', () => switchMode(MODE_TRAIN));
 document.getElementById('mode-play').addEventListener('click', () => switchMode(MODE_PLAY));
 
@@ -167,13 +199,14 @@ async function startHeadlessTrainer() {
     const dur = Math.round(performance.now() - startTime);
     trainStatsEl.textContent = `Last fitness ${Math.floor(fitness)}  best ${Math.floor(agent.bestFitness)}  iter ${dur}ms  sigma ${agent.sigma.toFixed(3)}`;
     updateAIStats();
+    // small yield so the UI can remain responsive
     await new Promise(r => setTimeout(r, 12));
   }
 }
 
 function stopHeadlessTrainer() { trainerRunning = false; }
 
-// Single consolidated runHeadlessEpisode (only one definition — fixes duplicate-declare errors)
+// Single consolidated runHeadlessEpisode
 function runHeadlessEpisode(candidateParams, maxTime = 20) {
   const bounds = { w: canvas.width / DPR, h: canvas.height / DPR };
   const p = new Player(bounds.w / 2, bounds.h / 2, candidateParams.state || { upgrades: {} });
@@ -292,6 +325,7 @@ function forwardWithParams(params, xarr) {
   return out;
 }
 
+// Play step
 function stepPlay(dt) {
   const inputs = collectInputs(aiPlayer, enemies);
   const decision = agent.decide(inputs);
@@ -347,5 +381,81 @@ function stepPlay(dt) {
   aiPlayer.update(dt);
 }
 
-// helpers and minor UI functions omitted for brevity in this snippet (collectInputs, render, tick, etc.)
-// (If you want, I can provide the full file with the omitted helper functions included verbatim.)
+function resetPlayRun() {
+  aiPlayer = new Player((canvas.width / DPR) / 2, (canvas.height / DPR) / 2, agent.state);
+  bullets = []; enemies = []; running = false; playerPoints = 100;
+  document.getElementById('start-run').disabled = false;
+  document.getElementById('pause-run').disabled = true;
+  updateUI();
+}
+
+function spawnAmbient() {
+  if (Math.random() < 0.02 && enemies.length < 18) {
+    const side = Math.floor(Math.random() * 4);
+    let x, y;
+    if (side === 0) { x = -20; y = Math.random() * (canvas.height / DPR); }
+    else if (side === 1) { x = (canvas.width / DPR) + 20; y = Math.random() * (canvas.height / DPR); }
+    else if (side === 2) { x = Math.random() * (canvas.width / DPR); y = -20; }
+    else { x = Math.random() * (canvas.width / DPR); y = (canvas.height / DPR) + 20; }
+    enemies.push(new Enemy(x, y, (Math.random() < 0.45) ? 'melee' : (Math.random() < 0.8 ? 'ranged' : 'fast')));
+  }
+}
+
+function render() {
+  const W = canvas.width / DPR, H = canvas.height / DPR;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#071018';
+  ctx.fillRect(0, 0, W, H);
+
+  for (const e of enemies) e.draw(ctx);
+  for (const b of bullets) b.draw(ctx);
+  aiPlayer.draw(ctx);
+
+  ctx.fillStyle = '#cfeff8';
+  ctx.font = '14px Inter, Arial';
+  ctx.fillText(`Mode: ${mode}  AI best fitness: ${Math.floor(agent.bestFitness)}`, 10, 18);
+  ctx.fillText(`AI gold: ${agent.state.gold || 0}  AI kills: ${aiPlayer.kills}`, 10, 36);
+
+  if (mode === MODE_PLAY && !running) {
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillRect(W/2 - 140, H/2 - 50, 280, 100);
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px Inter, Arial';
+    ctx.fillText('Play Run Paused', W/2 - 54, H/2 - 18);
+    ctx.fillStyle = '#c4dfe7';
+    ctx.font = '13px Inter, Arial';
+    ctx.fillText('Spawn enemies with the panel or click canvas (20 points each)', W/2 - 180, H/2 + 4);
+  }
+}
+
+function updateUI() {
+  const aiUp = agent.state && agent.state.upgrades ? agent.state.upgrades : {};
+  document.getElementById('player-points').textContent = playerPoints;
+  aiStatsEl.innerText = `Upgrades: ${JSON.stringify(aiUp)}\nGold: ${agent.state.gold || 0}`;
+}
+
+// main tick
+let last = performance.now();
+function tick(now) {
+  const dt = Math.min(1/30, (now - last) / 1000);
+  last = now;
+
+  if (mode === MODE_TRAIN) {
+    spawnAmbient();
+    if (Math.random() < 0.5) for (const e of enemies) e.update(dt, aiPlayer, bullets);
+  } else if (mode === MODE_PLAY) {
+    if (running) stepPlay(dt);
+  }
+
+  render();
+  updateUI();
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+// expose for debugging if needed
+window._RGINTERNAL = { agent, runHeadlessEpisode };
+
+// initialize
+switchMode(MODE_TRAIN);
+updateUI();
